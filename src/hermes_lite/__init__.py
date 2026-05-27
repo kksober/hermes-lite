@@ -19,6 +19,7 @@ from hermes_lite.memory.manager import MemoryManager
 from hermes_lite.providers.adapters import ProviderConfig
 from hermes_lite.sessions.manager import SessionManager
 from hermes_lite.skills.manager import SkillManager
+from hermes_lite.tools.builtin import register_builtin_tools
 from hermes_lite.tools.registry import ToolRegistry
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "SessionManager",
     "compress",
     "estimate_tokens",
+    "register_builtin_tools",
 ]
