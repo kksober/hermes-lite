@@ -7,18 +7,15 @@ produces a final text response.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Literal
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
-    ModelResponse,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
-    ToolReturnPart,
     UserPromptPart,
 )
 
@@ -131,7 +128,8 @@ class HermesAgent:
 
         The loop:
         1. Calls the LLM with the conversation history.
-        2. If the model returns tool calls, dispatches them and appends results.
+        2. If the model returns tool calls, pydantic-ai dispatches them
+           and result.all_messages() contains the correct message ordering.
         3. Repeats until the model produces a final text response or max_turns is hit.
 
         Args:
@@ -162,51 +160,35 @@ class HermesAgent:
                 output_type=result_type if result_type else str,
             )
 
-            # Extract the final output
+            # Use result.all_messages() — pydantic-ai guarantees correct
+            # message ordering (tool results immediately follow tool_calls).
+            messages = result.all_messages()
+
+            # Extract the response parts
             response_parts = result.new_messages()
             if not response_parts:
                 # If nothing was returned, try to use result.output directly
                 return str(result.output) if result.output else ""
 
             # Collect tool calls and text from response
-            tool_calls: list[dict[str, Any]] = []
+            has_tool_calls = False
             text_parts: list[str] = []
 
             for msg in response_parts:
                 for part in msg.parts:
                     if isinstance(part, ToolCallPart):
-                        tool_calls.append({
-                            "name": part.tool_name,
-                            "args": part.args_as_dict() if hasattr(part, "args_as_dict") else part.args,
-                            "tool_call_id": part.tool_call_id if hasattr(part, "tool_call_id") else None,
-                        })
+                        has_tool_calls = True
                     elif isinstance(part, TextPart):
                         text_parts.append(part.content)
 
             # If we have text output and no tool calls, we're done
-            if text_parts and not tool_calls:
+            if text_parts and not has_tool_calls:
                 return "\n".join(text_parts)
 
-            # If there are tool calls, dispatch them
-            if tool_calls:
-                # Append the model response (with tool calls) to history
-                messages.extend(response_parts)
-
-                # Dispatch each tool and build a new request with results
-                tool_return_parts: list[ToolReturnPart] = []
-                for tc in tool_calls:
-                    dispatch_result = self._tool_registry.dispatch(
-                        tc["name"], tc["args"]
-                    )
-                    tool_return_parts.append(
-                        ToolReturnPart(
-                            tool_name=tc["name"],
-                            content=dispatch_result,
-                            tool_call_id=tc.get("tool_call_id"),
-                        )
-                    )
-
-                messages.append(ModelRequest(parts=tool_return_parts))
+            # If there are tool calls, pydantic-ai has already executed
+            # them and result.all_messages() includes everything in order.
+            # Continue the loop with the updated message history.
+            if has_tool_calls:
                 continue
 
             # No tool calls and no text — force break
