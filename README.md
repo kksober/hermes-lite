@@ -16,11 +16,25 @@ Inspired by the architecture of [Hermes Agent](https://github.com/NousResearch/h
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
+# Clone
+git clone https://github.com/kksober/hermes-lite.git
+cd hermes-lite
 
-# Or with uv
-uv pip install -e .
+# Install
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+
+# Configure (DeepSeek recommended — cheap and capable)
+cp .env.example .env
+# Edit .env with your DEEPSEEK_API_KEY
+
+# Verify
+python examples/demo.py         # component demo (no API key needed)
+python examples/live_test.py    # live API test (requires API key)
+
+# Run tests
+python -m pytest tests/ -v
 ```
 
 ```python

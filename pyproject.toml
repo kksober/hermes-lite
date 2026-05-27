@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=0.30",
     "sqlite-utils>=3.0",
     "tiktoken>=0.5",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
