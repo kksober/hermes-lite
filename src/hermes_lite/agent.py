@@ -7,7 +7,7 @@ produces a final text response.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, AsyncGenerator, Literal
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
@@ -198,6 +198,86 @@ class HermesAgent:
 
         # Fallback: use final result output
         return str(result.output) if result.output else ""
+
+    async def run_stream(
+        self,
+        user_input: str,
+        max_turns: int = 50,
+    ) -> AsyncGenerator[str, None]:
+        """Stream text output from the agent, yielding chunks as they are produced.
+
+        The streaming loop is identical to :meth:`run` but yields text parts
+        from each LLM turn as soon as they arrive.  Tool calls are handled
+        transparently by pydantic-ai (auto-executed) and do not produce
+        visible output — only final text responses are yielded.
+
+        Args:
+            user_input: The user's message.
+            max_turns: Maximum tool-call iterations before forcing a response.
+
+        Yields:
+            Text chunks as they are produced by the model.
+        """
+        # Rebuild system prompt in case memory/tools changed
+        system_prompt = self.build_system_prompt()
+
+        # Build initial message history
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content=system_prompt)]),
+            ModelRequest(parts=[UserPromptPart(content=user_input)]),
+        ]
+
+        turn = 0
+        while turn < max_turns:
+            turn += 1
+
+            # Call the pydantic-ai agent with accumulated history
+            result = await self._pydantic_agent.run(
+                user_prompt=None,
+                message_history=messages,
+                output_type=str,
+            )
+
+            # Use result.all_messages() for correct message ordering
+            messages = result.all_messages()
+
+            # Extract the response parts
+            response_parts = result.new_messages()
+            if not response_parts:
+                if result.output:
+                    yield str(result.output)
+                return
+
+            # Collect tool calls and text from response
+            has_tool_calls = False
+            text_parts: list[str] = []
+
+            for msg in response_parts:
+                for part in msg.parts:
+                    if isinstance(part, ToolCallPart):
+                        has_tool_calls = True
+                    elif isinstance(part, TextPart):
+                        text_parts.append(part.content)
+
+            # If we have text output and no tool calls, yield and finish
+            if text_parts and not has_tool_calls:
+                yield "\n".join(text_parts)
+                return
+
+            # If there are tool calls, pydantic-ai has already executed
+            # them and result.all_messages() includes everything in order.
+            # Continue the loop with the updated message history.
+            if has_tool_calls:
+                continue
+
+            # No tool calls and no text — force break
+            if result.output:
+                yield str(result.output)
+            break
+
+        # Fallback: yield final result output
+        if result.output:
+            yield str(result.output)
 
     def tool(
         self,

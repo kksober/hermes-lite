@@ -11,6 +11,9 @@ dependencies = [
     "sqlite-utils>=3.0",
     "tiktoken>=0.5",
     "python-dotenv>=1.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "sse-starlette>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +24,7 @@ dev = [
 
 [project.scripts]
 hermes-lite = "hermes_lite.cli:main"
+hermes-lite-api = "hermes_lite.api:main"
 
 [build-system]
 requires = ["setuptools>=75"]
