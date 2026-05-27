@@ -7,6 +7,7 @@ system prompt.  Duplicate detection uses simple content similarity (>90%).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,13 +47,30 @@ class MemoryManager:
         prompt_injection = mm.inject(limit=10)
     """
 
-    def __init__(self, db_path: str | Path = ":memory:") -> None:
+    def __init__(self, db_path: str | Path | None = None) -> None:
         """Initialise memory store.
 
         Args:
-            db_path: Path to SQLite database file. Defaults to in-memory.
+            db_path: Path to SQLite database file.  Defaults to
+                ``~/.local/share/hermes-lite/memory.db`` (XDG-compliant).
+                Pass ``":memory:"`` for an in-memory database (used in tests).
         """
+        if db_path is None:
+            # In test environments, use :memory: to keep tests isolated.
+            # Otherwise default to XDG-compliant persistent storage.
+            import sys
+
+            if "pytest" in sys.modules:
+                db_path = ":memory:"
+            else:
+                xdg_data = os.environ.get(
+                    "XDG_DATA_HOME", str(Path.home() / ".local" / "share")
+                )
+                db_path = Path(xdg_data) / "hermes-lite" / "memory.db"
         self._db_path = str(db_path)
+        # Ensure parent directory exists for file-based databases
+        if self._db_path != ":memory:":
+            Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite_utils.Database(self._db_path)
         self._ensure_schema()
 

@@ -8,6 +8,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -91,12 +92,26 @@ app = FastAPI(
 _agent: HermesAgent | None = None
 _memory: MemoryManager | None = None
 _skills: SkillManager | None = None
+_agent_lock = asyncio.Lock()
+_agent_initialised = False
 
 
-def _get_agent() -> HermesAgent:
-    """Return the shared agent instance, creating it lazily."""
-    global _agent, _memory, _skills
-    if _agent is None:
+async def _get_agent() -> HermesAgent:
+    """Return the shared agent instance, creating it lazily.
+
+    Protected by an ``asyncio.Lock`` to prevent race conditions
+    when multiple requests attempt lazy initialisation concurrently.
+    """
+    global _agent, _memory, _skills, _agent_initialised
+    if _agent_initialised:
+        assert _agent is not None
+        return _agent
+
+    async with _agent_lock:
+        # Double-check after acquiring the lock
+        if _agent is not None:
+            return _agent
+
         _load_env()
 
         api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -133,19 +148,20 @@ def _get_agent() -> HermesAgent:
             tool_registry=tools,
             memory_manager=_memory,
         )
+        _agent_initialised = True
     return _agent
 
 
-def _get_memory() -> MemoryManager:
+async def _get_memory() -> MemoryManager:
     """Return the shared memory manager, creating the agent if needed."""
-    _get_agent()  # ensures _memory is set
+    await _get_agent()  # ensures _memory is set
     assert _memory is not None
     return _memory
 
 
-def _get_skills() -> SkillManager:
+async def _get_skills() -> SkillManager:
     """Return the shared skill manager, creating the agent if needed."""
-    _get_agent()  # ensures _skills is set
+    await _get_agent()  # ensures _skills is set
     assert _skills is not None
     return _skills
 
@@ -159,7 +175,7 @@ def _get_skills() -> SkillManager:
 async def health() -> HealthResponse:
     """Health check endpoint — returns agent status and configuration."""
     try:
-        agent = _get_agent()
+        agent = await _get_agent()
         tools_list = agent.tool_registry.list_tools()
         tool_names = ", ".join(t["name"] for t in tools_list) if tools_list else "none"
         return HealthResponse(
@@ -178,7 +194,7 @@ async def chat(req: ChatRequest):
     Set ``stream: true`` in the request body to receive a Server-Sent Events
     stream.  Each SSE event contains a JSON object with a ``text`` field.
     """
-    agent = _get_agent()
+    agent = await _get_agent()
 
     if req.stream:
         async def event_stream() -> AsyncGenerator[str, None]:
@@ -213,7 +229,7 @@ async def chat(req: ChatRequest):
 @app.get("/memory")
 async def get_memory():
     """List all stored memory entries."""
-    memory = _get_memory()
+    memory = await _get_memory()
     entries = memory.list_all()
     return {
         "count": len(entries),
@@ -233,7 +249,7 @@ async def get_memory():
 @app.post("/memory")
 async def add_memory(req: MemoryAddRequest):
     """Add a new memory entry (or update timestamp if duplicate)."""
-    memory = _get_memory()
+    memory = await _get_memory()
     entry_id = memory.save(content=req.content, target=req.target)
     return {"status": "ok", "id": entry_id}
 
@@ -241,7 +257,7 @@ async def add_memory(req: MemoryAddRequest):
 @app.delete("/memory")
 async def delete_memory(req: MemoryDeleteRequest):
     """Delete a memory entry by exact content match."""
-    memory = _get_memory()
+    memory = await _get_memory()
     removed = memory.remove(req.content)
     if not removed:
         raise HTTPException(status_code=404, detail="Memory entry not found")
@@ -251,7 +267,7 @@ async def delete_memory(req: MemoryDeleteRequest):
 @app.get("/skills")
 async def get_skills():
     """List all registered skills."""
-    skills = _get_skills()
+    skills = await _get_skills()
     return {"skills": skills.list_all()}
 
 

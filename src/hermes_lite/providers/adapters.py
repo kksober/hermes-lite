@@ -97,6 +97,7 @@ def create_agent(
     # Configure base URL via env if provided (for proxies and non-OpenAI providers)
     base_url_map: dict[str, str] = {
         "openai": "OPENAI_BASE_URL",
+        "anthropic": "ANTHROPIC_BASE_URL",
         "deepseek": "DEEPSEEK_BASE_URL",
         "openrouter": "OPENROUTER_BASE_URL",
     }
@@ -105,8 +106,11 @@ def create_agent(
         if env_var and not os.getenv(env_var):
             os.environ[env_var] = config.base_url
     # Default DeepSeek base URL if none set
-    elif config.provider == "deepseek" and not os.getenv("DEEPSEEK_BASE_URL"):
+    if config.provider == "deepseek" and not os.getenv("DEEPSEEK_BASE_URL"):
         os.environ["DEEPSEEK_BASE_URL"] = "https://api.deepseek.com"
+    # Default OpenRouter base URL if none set
+    if config.provider == "openrouter" and not os.getenv("OPENROUTER_BASE_URL"):
+        os.environ["OPENROUTER_BASE_URL"] = "https://openrouter.ai/api/v1"
 
     agent_kwargs: dict = {
         "model": model_str,

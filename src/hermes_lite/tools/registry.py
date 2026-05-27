@@ -133,18 +133,26 @@ class ToolRegistry:
     def as_pydantic_tools(self) -> list[Tool[None]]:
         """Convert registered tools to pydantic-ai Tool objects.
 
-        Uses Tool.from_function() to wrap handlers as structured tools.
+        The registry schema (``properties`` / ``required``) is passed via
+        ``parameters_json_schema`` so that pydantic-ai sees the descriptions
+        and constraints defined at registration time.
 
         Returns:
             List of pydantic_ai Tool instances.
         """
         result: list[Tool[None]] = []
         for name, entry in self._tools.items():
+            schema = entry["schema"]
             tool = Tool(
                 entry["handler"],
                 name=name,
-                description=entry["schema"].get("description", ""),
+                description=schema.get("description", ""),
                 require_parameter_descriptions=False,
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": schema.get("properties", {}),
+                    "required": schema.get("required", []),
+                },
             )
             result.append(tool)
         return result

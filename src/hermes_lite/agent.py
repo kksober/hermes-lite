@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
 
 from hermes_lite.memory.manager import MemoryManager
 from hermes_lite.providers.adapters import ProviderConfig, create_agent
+from hermes_lite.skills.manager import SkillManager
 from hermes_lite.tools.registry import ToolRegistry
 
 
@@ -41,6 +42,7 @@ class HermesAgent:
         persona: str = "You are a helpful AI assistant.",
         tool_registry: ToolRegistry | None = None,
         memory_manager: MemoryManager | None = None,
+        skill_manager: SkillManager | None = None,
         memory_inject_limit: int = 10,
         defer_model_check: bool = False,
     ) -> None:
@@ -51,6 +53,7 @@ class HermesAgent:
             persona: System prompt persona text.
             tool_registry: Optional pre-configured ToolRegistry.
             memory_manager: Optional MemoryManager for persistent memory.
+            skill_manager: Optional SkillManager for skill indexing.
             memory_inject_limit: Max memory entries to inject into the system prompt.
             defer_model_check: Passed through to pydantic-ai Agent.
         """
@@ -58,6 +61,7 @@ class HermesAgent:
         self._persona = persona
         self._tool_registry = tool_registry or ToolRegistry()
         self._memory = memory_manager
+        self._skills = skill_manager
         self._memory_inject_limit = memory_inject_limit
         self._defer_model_check = defer_model_check
 
@@ -76,26 +80,30 @@ class HermesAgent:
         """Return the memory manager, if configured."""
         return self._memory
 
+    @property
+    def skills(self) -> SkillManager | None:
+        """Return the skill manager, if configured."""
+        return self._skills
+
     def _build_agent(self) -> Agent[None, str]:
-        """Create (or recreate) the underlying pydantic-ai Agent."""
+        """Create (or recreate) the underlying pydantic-ai Agent.
+
+        The system prompt is passed as an empty string here to avoid
+        duplication — the real system prompt is injected as a
+        ``SystemPromptPart`` in the message history at the start of each
+        ``run()`` / ``run_stream()`` call.
+        """
         return create_agent(
             self._config,
-            system_prompt=self.build_system_prompt(),
+            system_prompt="",
             tools=self._tool_registry.as_pydantic_tools(),
             defer_model_check=self._defer_model_check,
         )
 
-    @property
-    def _pydantic_agent(self) -> Agent[None, str]:
-        """Return the underlying pydantic-ai Agent, creating it lazily."""
-        if not hasattr(self, "_pydantic_agent_cache"):
-            self._pydantic_agent_cache = self._build_agent()
-        return self._pydantic_agent_cache
-
     def build_system_prompt(self) -> str:
         """Assemble the full system prompt.
 
-        Composed from: persona + injected memory + tool schemas.
+        Composed from: persona + injected memory + skill index + tool schemas.
 
         Returns:
             Complete system prompt string.
@@ -107,6 +115,12 @@ class HermesAgent:
             mem_text = self._memory.inject(limit=self._memory_inject_limit)
             if mem_text:
                 parts.append("\n" + mem_text)
+
+        # Inject skill index if available
+        if self._skills is not None:
+            skill_text = self._skills.index()
+            if skill_text:
+                parts.append("\n" + skill_text)
 
         # Append tool schemas as a compact description
         tools_list = self._tool_registry.list_tools()
@@ -153,8 +167,12 @@ class HermesAgent:
         while turn < max_turns:
             turn += 1
 
+            # Rebuild the pydantic agent every turn to pick up any
+            # newly registered tools (via the @agent.tool decorator).
+            agent = self._build_agent()
+
             # Call the pydantic-ai agent with accumulated history
-            result = await self._pydantic_agent.run(
+            result = await agent.run(
                 user_prompt=None,
                 message_history=messages,
                 output_type=result_type if result_type else str,
@@ -231,8 +249,12 @@ class HermesAgent:
         while turn < max_turns:
             turn += 1
 
+            # Rebuild the pydantic agent every turn to pick up any
+            # newly registered tools.
+            agent = self._build_agent()
+
             # Call the pydantic-ai agent with accumulated history
-            result = await self._pydantic_agent.run(
+            result = await agent.run(
                 user_prompt=None,
                 message_history=messages,
                 output_type=str,
@@ -337,8 +359,8 @@ class HermesAgent:
                 requires=requires,
             )
 
-            # Rebuild the cached pydantic agent with updated tools
-            self._pydantic_agent_cache = self._build_agent()
+            # The agent is rebuilt on every run() call, so no cache
+            # invalidation is needed here.
             return func
 
         return decorator

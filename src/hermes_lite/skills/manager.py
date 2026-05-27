@@ -7,13 +7,14 @@ Each file has YAML frontmatter with ``name``, ``description``, and ``version``.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
-    """Parse YAML frontmatter from a Markdown string.
+    """Parse YAML frontmatter from a Markdown string using ``yaml.safe_load``.
 
     Args:
         text: Full text content potentially starting with ``---`` frontmatter.
@@ -27,20 +28,19 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     parts = text.split("---", 2)
     if len(parts) < 3:
         return {}, text
-    frontmatter: dict[str, str] = {}
-    for line in parts[1].strip().split("\n"):
-        line = line.strip()
-        if ":" in line:
-            key, value = line.split(":", 1)
-            frontmatter[key.strip()] = value.strip()
+    try:
+        frontmatter = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return {}, text
+    if not isinstance(frontmatter, dict):
+        return {}, text
     return frontmatter, parts[2].strip()
 
 
 def _make_frontmatter(meta: dict[str, str]) -> str:
     """Serialize a metadata dict back to YAML frontmatter text."""
     lines = ["---"]
-    for key, value in meta.items():
-        lines.append(f"{key}: {value}")
+    lines.append(yaml.dump(meta, default_flow_style=False).strip())
     lines.append("---")
     return "\n".join(lines)
 
