@@ -15,8 +15,12 @@ htmlcov/
 .vscode/
 .idea/
 
-# Skills (user data)
-skills/*/
+# Skills (user data) — .gitkeep to track directory, but ignore user-created skills
+skills/*
+!skills/code-review/
+!skills/filesystem/
+!skills/web-research/
+!skills/.gitkeep
 
 # Sessions (user data)  
 sessions/*.db
