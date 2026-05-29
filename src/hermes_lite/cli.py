@@ -25,8 +25,10 @@ from hermes_lite.agent import HermesAgent
 from hermes_lite.coding.audit import AuditLogger
 from hermes_lite.coding.context import build_project_map
 from hermes_lite.coding.git import GitClient
+from hermes_lite.coding.mcp_client import McpClientManager
 from hermes_lite.coding.permissions import PermissionDecision, PermissionPolicy
 from hermes_lite.coding.sessions import SessionManager
+from hermes_lite.coding.worktree_exec import WorktreeExecutor
 from hermes_lite.coding.workspace import Workspace
 from hermes_lite.memory.manager import MemoryManager
 from hermes_lite.prompts.coding_agent import build_coding_prompt
@@ -150,7 +152,14 @@ def create_workspace_runtime(
     audit = AuditLogger()
     policy = permission_policy or PermissionPolicy(interactive=True, confirm=confirm, audit=audit)
     sessions = SessionManager(workspace, policy, audit=audit)
-    register_coding_tools(tools, workspace, policy, session_manager=sessions)
+    mcp = McpClientManager(workspace)
+    wt_exec = WorktreeExecutor(workspace, policy, audit=audit)
+    register_coding_tools(
+        tools, workspace, policy,
+        session_manager=sessions,
+        mcp_manager=mcp,
+        worktree_executor=wt_exec,
+    )
     return WorkspaceRuntime(
         workspace=workspace,
         permission_policy=policy,
@@ -214,10 +223,13 @@ async def _handle_dot_command(
                 print("  /testfor <path>  Find test files for a source file")
                 print("  /repomap         Token-aware repository overview")
                 print("  /projectmap      Show project structure summary")
-                print("  /plan <task>     Generate a subagent plan (DRY-RUN)")
-                print("  /todo            Show agent todo (stub)")
-                print("  /run             Resume agent execution (stub)")
-                print("  /resume <id>     Resume a session (stub)")
+                print("  /lsp             Show LSP server availability")
+                print("  /mcp             Show MCP server connection status")
+                print("  /worktree        Show git worktree info")
+                print("  /plan <task>     Generate a subagent plan")
+                print("  /todo [text]     Add a todo item")
+                print("  /run             Resume agent execution stub")
+                print("  /resume <id>     Resume a command session")
             print("  Any other text is sent to the agent.")
             return True
 
@@ -374,6 +386,42 @@ async def _handle_dot_command(
                 print("Usage: /resume <session-id>")
                 return True
             print(f"(resume session {sid} not yet implemented)")
+            return True
+
+        case "lsp":
+            from hermes_lite.coding.lsp import discover_lsp_servers, lsp_status
+            st = lsp_status()
+            if st.get("available_servers"):
+                for s in st["available_servers"]:
+                    print(f"  {s['name']} ({', '.join(s['languages'])}) — {s['executable']}")
+            else:
+                print("  No LSP servers found. Install pyright/pylsp/typescript-language-server.")
+            print(f"  Active sessions: {st['active_sessions']}")
+            return True
+
+        case "mcp":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            from hermes_lite.coding.mcp_client import McpClientManager
+            mcp_mgr = McpClientManager(workspace_runtime.workspace)
+            config = mcp_mgr.connect_all()
+            if config.get("details"):
+                for d in config["details"]:
+                    print(f"  {d['name']}: {d['status']} ({d['command']})")
+            else:
+                print("  No MCP servers configured in .hermes/mcp.json")
+            mcp_mgr.shutdown_all()
+            return True
+
+        case "worktree":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            wt = GitClient(workspace_runtime.workspace).worktree_status()
+            print(f"  Is git repo: {wt['is_git_repo']}")
+            for wt_info in wt.get("worktrees", []):
+                print(f"  {wt_info.get('worktree', '?')} [{wt_info.get('branch', '?')}]")
             return True
 
         case "recent":

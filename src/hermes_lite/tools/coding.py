@@ -17,6 +17,16 @@ from hermes_lite.coding.context import (
 from hermes_lite.coding.diagnostics import diagnose_python, extract_python_symbols
 from hermes_lite.coding.extensibility import hook_status, load_external_tools, load_mcp_servers
 from hermes_lite.coding.git import GitClient
+from hermes_lite.coding.lsp import (
+    discover_lsp_servers,
+    lsp_definition,
+    lsp_diagnostics,
+    lsp_hover,
+    lsp_references,
+    lsp_status,
+    lsp_symbols,
+)
+from hermes_lite.coding.mcp_client import McpClientManager
 from hermes_lite.coding.patches import (
     apply_text_patch,
     apply_unified_diff,
@@ -26,7 +36,12 @@ from hermes_lite.coding.patches import (
 from hermes_lite.coding.permissions import PermissionPolicy
 from hermes_lite.coding.sessions import SessionManager
 from hermes_lite.coding.shell import CommandRunner
-from hermes_lite.coding.subagents import create_subagent_plan
+from hermes_lite.coding.subagents import (
+    create_subagent_plan,
+    execute_subagent_plan,
+    subagent_execute_with_commands,
+)
+from hermes_lite.coding.worktree_exec import WorktreeExecutor
 from hermes_lite.coding.workspace import Workspace
 from hermes_lite.tools.registry import ToolRegistry
 
@@ -37,12 +52,16 @@ def register_coding_tools(
     permission_policy: PermissionPolicy | None = None,
     *,
     session_manager: SessionManager | None = None,
+    mcp_manager: McpClientManager | None = None,
+    worktree_executor: WorktreeExecutor | None = None,
 ) -> None:
     """Register workspace-aware coding tools."""
     policy = permission_policy or PermissionPolicy()
     runner = CommandRunner(workspace, policy)
     git = GitClient(workspace)
     sessions = session_manager or SessionManager(workspace, policy)
+    mcp = mcp_manager or McpClientManager(workspace)
+    wt_exec = worktree_executor or WorktreeExecutor(workspace, policy)
 
     def as_json(func: Callable[..., dict[str, object]]) -> Callable[..., str]:
         def wrapper(**kwargs: Any) -> str:
@@ -441,5 +460,189 @@ def register_coding_tools(
             "required": [],
         },
         handler=as_json(lambda: sessions.list_sessions()),
+        toolset="coding",
+    )
+
+    # -- LSP tools --------------------------------------------------------
+
+    registry.register(
+        name="lsp_status",
+        schema={"description": "Check which LSP servers are available.", "properties": {}, "required": []},
+        handler=as_json(lambda: lsp_status()),
+        toolset="coding",
+    )
+    registry.register(
+        name="lsp_diagnostics",
+        schema={
+            "description": "Get LSP diagnostics for a file (falls back if no LSP).",
+            "properties": {
+                "path": {"type": "string"},
+                "language": {"type": "string"},
+            },
+            "required": ["path"],
+        },
+        handler=as_json(
+            lambda path, language="python": lsp_diagnostics(
+                str(workspace.root), path, language=language,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="lsp_symbols",
+        schema={
+            "description": "Get document symbols via LSP.",
+            "properties": {
+                "path": {"type": "string"},
+                "language": {"type": "string"},
+            },
+            "required": ["path"],
+        },
+        handler=as_json(
+            lambda path, language="python": lsp_symbols(
+                str(workspace.root), path, language=language,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="lsp_definition",
+        schema={
+            "description": "Go to definition via LSP.",
+            "properties": {
+                "path": {"type": "string"},
+                "line": {"type": "integer"},
+                "column": {"type": "integer"},
+                "language": {"type": "string"},
+            },
+            "required": ["path", "line", "column"],
+        },
+        handler=as_json(
+            lambda path, line, column, language="python": lsp_definition(
+                str(workspace.root), path, line, column, language=language,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="lsp_references",
+        schema={
+            "description": "Find references via LSP.",
+            "properties": {
+                "path": {"type": "string"},
+                "line": {"type": "integer"},
+                "column": {"type": "integer"},
+                "language": {"type": "string"},
+            },
+            "required": ["path", "line", "column"],
+        },
+        handler=as_json(
+            lambda path, line, column, language="python": lsp_references(
+                str(workspace.root), path, line, column, language=language,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="lsp_hover",
+        schema={
+            "description": "Get hover info via LSP.",
+            "properties": {
+                "path": {"type": "string"},
+                "line": {"type": "integer"},
+                "column": {"type": "integer"},
+                "language": {"type": "string"},
+            },
+            "required": ["path", "line", "column"],
+        },
+        handler=as_json(
+            lambda path, line, column, language="python": lsp_hover(
+                str(workspace.root), path, line, column, language=language,
+            )
+        ),
+        toolset="coding",
+    )
+
+    # -- MCP tools --------------------------------------------------------
+
+    registry.register(
+        name="mcp_status",
+        schema={"description": "Show MCP server connection status.", "properties": {}, "required": []},
+        handler=as_json(lambda: mcp.status()),
+        toolset="coding",
+    )
+    registry.register(
+        name="mcp_connect",
+        schema={
+            "description": "Start all declared MCP servers from .hermes/mcp.json.",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: mcp.connect_all()),
+        toolset="coding",
+    )
+    registry.register(
+        name="mcp_list_tools",
+        schema={
+            "description": "List tools from all connected MCP servers.",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: mcp.list_all_tools()),
+        toolset="coding",
+    )
+    registry.register(
+        name="mcp_call_tool",
+        schema={
+            "description": "Call a tool on a connected MCP server.",
+            "properties": {
+                "server": {"type": "string"},
+                "tool": {"type": "string"},
+                "arguments": {"type": "object"},
+            },
+            "required": ["server", "tool"],
+        },
+        handler=as_json(
+            lambda server, tool, arguments=None: mcp.call_tool(
+                server, tool, arguments or {},
+            )
+        ),
+        toolset="coding",
+    )
+
+    # -- worktree / subagent tools ----------------------------------------
+
+    registry.register(
+        name="subagent_execute",
+        schema={
+            "description": "Execute a subagent plan with explicit commands in an isolated worktree.",
+            "properties": {
+                "task": {"type": "string"},
+                "planner_commands": {"type": "array", "items": {"type": "string"}},
+                "builder_commands": {"type": "array", "items": {"type": "string"}},
+                "reviewer_commands": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["task"],
+        },
+        handler=as_json(
+            lambda task, planner_commands=None, builder_commands=None, reviewer_commands=None: (
+                subagent_execute_with_commands(
+                    task, workspace, policy,
+                    planner_commands=planner_commands,
+                    builder_commands=builder_commands,
+                    reviewer_commands=reviewer_commands,
+                )
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="worktree_status_tool",
+        schema={
+            "description": "Inspect git worktree status (alias).",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: git.worktree_status()),
         toolset="coding",
     )
