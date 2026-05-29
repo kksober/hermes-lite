@@ -15,15 +15,18 @@ import json
 import os
 import signal
 import sys
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from hermes_lite.agent import HermesAgent
+from hermes_lite.coding.audit import AuditLogger
 from hermes_lite.coding.context import build_project_map
 from hermes_lite.coding.git import GitClient
-from hermes_lite.coding.permissions import PermissionPolicy
+from hermes_lite.coding.permissions import PermissionDecision, PermissionPolicy
+from hermes_lite.coding.sessions import SessionManager
 from hermes_lite.coding.workspace import Workspace
 from hermes_lite.memory.manager import MemoryManager
 from hermes_lite.prompts.coding_agent import build_coding_prompt
@@ -77,6 +80,8 @@ class WorkspaceRuntime:
 
     workspace: Workspace
     permission_policy: PermissionPolicy
+    session_manager: SessionManager
+    audit_logger: AuditLogger
 
 
 def _load_env() -> None:
@@ -135,14 +140,23 @@ def create_workspace_runtime(
     workspace_path: str,
     tools: ToolRegistry,
     permission_policy: PermissionPolicy | None = None,
+    *,
+    confirm: "Callable[[PermissionDecision], bool] | None" = None,
 ) -> WorkspaceRuntime | None:
     """Create workspace runtime and register coding tools when configured."""
     if not workspace_path:
         return None
     workspace = Workspace(workspace_path)
-    policy = permission_policy or PermissionPolicy()
-    register_coding_tools(tools, workspace, policy)
-    return WorkspaceRuntime(workspace=workspace, permission_policy=policy)
+    audit = AuditLogger()
+    policy = permission_policy or PermissionPolicy(interactive=True, confirm=confirm, audit=audit)
+    sessions = SessionManager(workspace, policy, audit=audit)
+    register_coding_tools(tools, workspace, policy, session_manager=sessions)
+    return WorkspaceRuntime(
+        workspace=workspace,
+        permission_policy=policy,
+        session_manager=sessions,
+        audit_logger=audit,
+    )
 
 
 def build_persona(
@@ -192,7 +206,15 @@ async def _handle_dot_command(
                 print("  /status          Show workspace and git status")
                 print("  /diff            Show current git diff")
                 print("  /permissions     Show active permission policy")
+                print("  /approve <rule>  Approve a pending permission category")
+                print("  /deny <rule>     Deny a pending permission category")
+                print("  /audit           Show audit log summary")
+                print("  /sessions        List background command sessions")
                 print("  /projectmap      Show project structure summary")
+                print("  /plan <task>     Generate a subagent plan (DRY-RUN)")
+                print("  /todo            Show agent todo (stub)")
+                print("  /run             Resume agent execution (stub)")
+                print("  /resume <id>     Resume a session (stub)")
             print("  Any other text is sent to the agent.")
             return True
 
@@ -268,6 +290,87 @@ async def _handle_dot_command(
                 print("No workspace configured. Start with --workspace PATH.")
                 return True
             print(json.dumps(build_project_map(workspace_runtime.workspace), indent=2))
+            return True
+
+        case "approve":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            category = args.strip()
+            valid_categories = {"network", "risky_git", "shell_control", "package_install"}
+            if category not in valid_categories:
+                print(f"Usage: /approve <category> — one of: {', '.join(sorted(valid_categories))}")
+                return True
+            workspace_runtime.permission_policy.authorize("category", category, scope="session")
+            print(f"Category '{category}' authorized for this session.")
+            return True
+
+        case "deny":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            category = args.strip()
+            if not category:
+                print("Usage: /deny <category>")
+                return True
+            workspace_runtime.permission_policy.revoke("category", category)
+            print(f"Category '{category}' authorization revoked.")
+            return True
+
+        case "sessions":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            result = workspace_runtime.session_manager.list_sessions()
+            if not result["sessions"]:
+                print("(no active sessions)")
+            else:
+                for s in result["sessions"]:
+                    status = "RUNNING" if s["running"] else "STOPPED"
+                    print(f"  [{s['session_id']}] {status}  {s['command']}")
+            return True
+
+        case "audit":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            summary = workspace_runtime.audit_logger.summary()
+            print(f"  Audit entries: {summary['total_entries']}")
+            print(f"  Allowed: {summary['allowed']}, Asked: {summary['asked']}, Denied: {summary['denied']}")
+            recent = workspace_runtime.audit_logger.recent(5)
+            if recent:
+                print("  Recent:")
+                for e in recent:
+                    print(f"    [{e.decision:>5}] {e.operation}: {e.target} ({e.reason})")
+            return True
+
+        case "plan":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            task = args.strip()
+            if not task:
+                print("Usage: /plan <task description>")
+                return True
+            from hermes_lite.coding.subagents import create_subagent_plan
+            plan = create_subagent_plan(task)
+            print(json.dumps(plan.to_dict(), indent=2))
+            return True
+
+        case "todo":
+            print("(todo tracking not yet implemented)")
+            return True
+
+        case "run":
+            print("(run/resume agent not yet implemented from slash command)")
+            return True
+
+        case "resume":
+            sid = args.strip()
+            if not sid:
+                print("Usage: /resume <session-id>")
+                return True
+            print(f"(resume session {sid} not yet implemented)")
             return True
 
         case "clear":
@@ -355,6 +458,8 @@ async def run_repl(
                 workspace_runtime=workspace_runtime,
             )
             if not should_continue:
+                if workspace_runtime is not None:
+                    workspace_runtime.session_manager.cleanup()
                 return
             continue
 
@@ -393,7 +498,23 @@ def main() -> None:
 
     tools = ToolRegistry()
     register_builtin_tools(tools)
-    workspace_runtime = create_workspace_runtime(args.workspace, tools)
+
+    # build confirm callback for interactive permission prompts
+    def _confirm_permission(decision: PermissionDecision) -> bool:
+        print(f"\n  [PERMISSION] {decision.operation}: {decision.target}")
+        print(f"  Reason: {decision.reason}")
+        if decision.message:
+            print(f"  {decision.message}")
+        try:
+            answer = input("  Approve? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        return answer in ("y", "yes")
+
+    workspace_runtime = create_workspace_runtime(
+        args.workspace, tools, confirm=_confirm_permission
+    )
 
     skills = SkillManager(base_dir="skills/")
     memory = MemoryManager()
@@ -418,7 +539,10 @@ def main() -> None:
         asyncio.run(run_repl(agent, memory, skills, workspace_runtime=workspace_runtime))
     except KeyboardInterrupt:
         print("\nGoodbye!")
-        sys.exit(0)
+    finally:
+        if workspace_runtime is not None:
+            workspace_runtime.session_manager.cleanup()
+    sys.exit(0)
 
 
 if __name__ == "__main__":

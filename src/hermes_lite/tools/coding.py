@@ -11,6 +11,7 @@ from hermes_lite.coding.extensibility import hook_status, load_external_tools, l
 from hermes_lite.coding.git import GitClient
 from hermes_lite.coding.patches import apply_text_patch
 from hermes_lite.coding.permissions import PermissionPolicy
+from hermes_lite.coding.sessions import SessionManager
 from hermes_lite.coding.shell import CommandRunner
 from hermes_lite.coding.subagents import create_subagent_plan
 from hermes_lite.coding.workspace import Workspace
@@ -21,11 +22,14 @@ def register_coding_tools(
     registry: ToolRegistry,
     workspace: Workspace,
     permission_policy: PermissionPolicy | None = None,
+    *,
+    session_manager: SessionManager | None = None,
 ) -> None:
     """Register workspace-aware coding tools."""
     policy = permission_policy or PermissionPolicy()
     runner = CommandRunner(workspace, policy)
     git = GitClient(workspace)
+    sessions = session_manager or SessionManager(workspace, policy)
 
     def as_json(func: Callable[..., dict[str, object]]) -> Callable[..., str]:
         def wrapper(**kwargs: Any) -> str:
@@ -255,5 +259,85 @@ def register_coding_tools(
         name="worktree_status",
         schema={"description": "Inspect git worktree status.", "properties": {}, "required": []},
         handler=as_json(lambda: git.worktree_status()),
+        toolset="coding",
+    )
+
+    # -- long-running command sessions ----------------------------------
+
+    registry.register(
+        name="start_command",
+        schema={
+            "description": "Start a long-running command in the background.",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to run."},
+                "cwd": {"type": "string", "description": "Working directory."},
+                "pty": {"type": "boolean", "description": "Use PTY for interactive commands."},
+                "timeout_seconds": {"type": "number", "description": "Auto-stop after N seconds."},
+            },
+            "required": ["command"],
+        },
+        handler=as_json(
+            lambda command, cwd=".", pty=False, timeout_seconds=None: sessions.start(
+                command, cwd=cwd, pty=pty, timeout_seconds=timeout_seconds
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="read_command",
+        schema={
+            "description": "Read buffered output from a running command session.",
+            "properties": {
+                "session_id": {"type": "string"},
+                "offset": {"type": "integer"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["session_id"],
+        },
+        handler=as_json(
+            lambda session_id, offset=0, limit=100: sessions.read(
+                session_id, offset=offset, limit=limit
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="write_stdin",
+        schema={
+            "description": "Send input to a running command session.",
+            "properties": {
+                "session_id": {"type": "string"},
+                "text": {"type": "string"},
+            },
+            "required": ["session_id", "text"],
+        },
+        handler=as_json(
+            lambda session_id, text: sessions.write_stdin(session_id, text)
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="stop_command",
+        schema={
+            "description": "Stop a running command session.",
+            "properties": {
+                "session_id": {"type": "string"},
+                "force": {"type": "boolean"},
+            },
+            "required": ["session_id"],
+        },
+        handler=as_json(
+            lambda session_id, force=False: sessions.stop(session_id, force=force)
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="list_sessions",
+        schema={
+            "description": "List all command sessions (running and finished).",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: sessions.list_sessions()),
         toolset="coding",
     )
