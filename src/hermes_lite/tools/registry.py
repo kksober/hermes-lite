@@ -143,16 +143,16 @@ class ToolRegistry:
         result: list[Tool[None]] = []
         for name, entry in self._tools.items():
             schema = entry["schema"]
-            tool = Tool(
+            json_schema: dict[str, Any] = {
+                "type": "object",
+                "properties": schema.get("properties", {}),
+                "required": schema.get("required", []),
+            }
+            tool = Tool.from_schema(
                 entry["handler"],
                 name=name,
                 description=schema.get("description", ""),
-                require_parameter_descriptions=False,
-                parameters_json_schema={
-                    "type": "object",
-                    "properties": schema.get("properties", {}),
-                    "required": schema.get("required", []),
-                },
+                json_schema=json_schema,
             )
             result.append(tool)
         return result
