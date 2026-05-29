@@ -188,7 +188,7 @@ python -m pytest tests/ --cov=src/hermes_lite --cov-report=term-missing
 ### 文档
 
 ```
-doc/
+docs/
 ├── specs/          # 技术规格说明
 ├── iterations/     # 产品迭代记录
 ├── verification/   # 技术验证报告
