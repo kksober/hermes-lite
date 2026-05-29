@@ -21,10 +21,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from hermes_lite.agent import HermesAgent
+from hermes_lite.coding.permissions import PermissionPolicy
+from hermes_lite.coding.workspace import Workspace
 from hermes_lite.memory.manager import MemoryManager
+from hermes_lite.prompts.coding_agent import build_coding_prompt
 from hermes_lite.providers.adapters import ProviderConfig
 from hermes_lite.skills.manager import SkillManager
 from hermes_lite.tools.builtin import register_builtin_tools
+from hermes_lite.tools.coding import register_coding_tools
 from hermes_lite.tools.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -144,24 +148,35 @@ async def _get_agent() -> HermesAgent:
         tools = ToolRegistry()
         register_builtin_tools(tools)
 
+        base_persona = (
+            "You are Hermes Agent, an intelligent AI assistant created by "
+            "Nous Research. You are helpful, knowledgeable, and direct. You "
+            "assist users with a wide range of tasks including answering "
+            "questions, writing and editing code, analyzing information, "
+            "creative work, and executing actions via your tools. You "
+            "communicate clearly, admit uncertainty when appropriate, and "
+            "prioritize being genuinely useful over being verbose unless "
+            "otherwise directed below. Be targeted and efficient in your "
+            "exploration and investigations."
+        )
+        workspace_path = os.getenv("HERMES_WORKSPACE", "")
+        if workspace_path:
+            workspace = Workspace(workspace_path)
+            permission_policy = PermissionPolicy()
+            register_coding_tools(tools, workspace, permission_policy)
+            persona = base_persona + "\n\n" + build_coding_prompt(workspace, permission_policy)
+        else:
+            persona = base_persona
+
         _skills = SkillManager(base_dir="skills/")
         _memory = MemoryManager()
 
         _agent = HermesAgent(
             config=config,
-            persona=(
-                "You are Hermes Agent, an intelligent AI assistant created by "
-                "Nous Research. You are helpful, knowledgeable, and direct. You "
-                "assist users with a wide range of tasks including answering "
-                "questions, writing and editing code, analyzing information, "
-                "creative work, and executing actions via your tools. You "
-                "communicate clearly, admit uncertainty when appropriate, and "
-                "prioritize being genuinely useful over being verbose unless "
-                "otherwise directed below. Be targeted and efficient in your "
-                "exploration and investigations."
-            ),
+            persona=persona,
             tool_registry=tools,
             memory_manager=_memory,
+            skill_manager=_skills,
         )
         _agent_initialised = True
     return _agent

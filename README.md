@@ -93,3 +93,21 @@ source .venv/bin/activate
 uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
+
+## Coding Agent Mode
+
+Hermes Lite can run as a clean-room coding agent without depending on OpenCode
+source code:
+
+```bash
+hermes-lite --workspace /path/to/repo
+```
+
+Coding mode adds workspace-aware tools for file search, reads, exact text
+patches, safe command execution, git status/diff, project maps, Python syntax
+diagnostics, hook/tool config discovery, and subagent planning. Writes are
+restricted to the workspace and protected paths such as `.env`, `.git`, private
+keys, dependency caches, and virtualenvs are blocked by default.
+
+For the API server, set `HERMES_WORKSPACE=/path/to/repo` before starting
+`hermes-lite-api`.

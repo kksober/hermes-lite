@@ -11,18 +11,26 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from hermes_lite.agent import HermesAgent
+from hermes_lite.coding.context import build_project_map
+from hermes_lite.coding.git import GitClient
+from hermes_lite.coding.permissions import PermissionPolicy
+from hermes_lite.coding.workspace import Workspace
 from hermes_lite.memory.manager import MemoryManager
+from hermes_lite.prompts.coding_agent import build_coding_prompt
 from hermes_lite.providers.adapters import ProviderConfig
 from hermes_lite.skills.manager import SkillManager
 from hermes_lite.tools.builtin import register_builtin_tools
+from hermes_lite.tools.coding import register_coding_tools
 from hermes_lite.tools.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -51,6 +59,24 @@ BANNER = r"""
 
  Type /help for commands, /quit to exit.
 """
+
+DEFAULT_PERSONA = (
+    "You are Hermes Agent, an intelligent AI assistant created by "
+    "Nous Research. You are helpful, knowledgeable, and direct. You "
+    "assist users with a wide range of tasks including answering "
+    "questions, writing and editing code, analyzing information, "
+    "creative work, and executing actions via your tools. You "
+    "communicate clearly, admit uncertainty when appropriate, and "
+    "prioritize being genuinely useful over being verbose."
+)
+
+
+@dataclass
+class WorkspaceRuntime:
+    """Runtime objects for workspace-aware coding mode."""
+
+    workspace: Workspace
+    permission_policy: PermissionPolicy
 
 
 def _load_env() -> None:
@@ -82,6 +108,56 @@ def _get_history_path() -> Path:
     return base / "hermes-lite" / "history"
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
+    parser = argparse.ArgumentParser(
+        description="Hermes Lite — interactive AI assistant REPL",
+    )
+    parser.add_argument(
+        "--provider",
+        default=os.getenv("HERMES_PROVIDER", "deepseek"),
+        help="LLM provider (default: deepseek, or $HERMES_PROVIDER)",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.getenv("HERMES_MODEL", "deepseek-chat"),
+        help="Model name (default: deepseek-chat, or $HERMES_MODEL)",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("HERMES_WORKSPACE", ""),
+        help="Enable coding-agent mode for this workspace path.",
+    )
+    return parser
+
+
+def create_workspace_runtime(
+    workspace_path: str,
+    tools: ToolRegistry,
+    permission_policy: PermissionPolicy | None = None,
+) -> WorkspaceRuntime | None:
+    """Create workspace runtime and register coding tools when configured."""
+    if not workspace_path:
+        return None
+    workspace = Workspace(workspace_path)
+    policy = permission_policy or PermissionPolicy()
+    register_coding_tools(tools, workspace, policy)
+    return WorkspaceRuntime(workspace=workspace, permission_policy=policy)
+
+
+def build_persona(
+    base_persona: str = DEFAULT_PERSONA,
+    *,
+    workspace: Workspace | None = None,
+    permission_policy: PermissionPolicy | None = None,
+) -> str:
+    """Compose the base persona with coding-agent instructions when needed."""
+    if workspace is None:
+        return base_persona
+    policy = permission_policy or PermissionPolicy()
+    return base_persona + "\n\n" + build_coding_prompt(workspace, policy)
+
+
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
@@ -94,6 +170,7 @@ async def _handle_dot_command(
     agent: HermesAgent,
     memory: MemoryManager,
     skills: SkillManager,
+    workspace_runtime: WorkspaceRuntime | None = None,
 ) -> bool:
     """Handle a slash-command.  Returns ``True`` if the REPL should continue,
     ``False`` if it should exit."""
@@ -111,6 +188,11 @@ async def _handle_dot_command(
             print("  /clear           Clear the screen")
             print("  /tools           List registered tools")
             print("  /model           Show current model/provider info")
+            if workspace_runtime is not None:
+                print("  /status          Show workspace and git status")
+                print("  /diff            Show current git diff")
+                print("  /permissions     Show active permission policy")
+                print("  /projectmap      Show project structure summary")
             print("  Any other text is sent to the agent.")
             return True
 
@@ -148,6 +230,46 @@ async def _handle_dot_command(
             print(f"  Base URL: {cfg.base_url or '(default)'}")
             return True
 
+        case "status":
+            if workspace_runtime is None:
+                print("No workspace configured. Start with --workspace PATH.")
+                return True
+            git_status = GitClient(workspace_runtime.workspace).status()
+            print(f"  Workspace: {workspace_runtime.workspace.root}")
+            print(f"  Provider:  {agent.config.provider}")
+            print(f"  Model:     {agent.config.model}")
+            if git_status.get("ok"):
+                print(f"  Git branch: {git_status.get('branch') or '(detached)'}")
+                print(f"  Git clean:  {git_status.get('clean')}")
+            else:
+                print(f"  Git:       {git_status.get('error')}")
+            return True
+
+        case "diff":
+            if workspace_runtime is None:
+                print("No workspace configured. Start with --workspace PATH.")
+                return True
+            diff = GitClient(workspace_runtime.workspace).diff(stat=False)
+            if diff.get("ok"):
+                print(diff.get("diff") or "(no diff)")
+            else:
+                print(f"Unable to read diff: {diff.get('error')}")
+            return True
+
+        case "permissions":
+            if workspace_runtime is None:
+                print("No workspace configured. Start with --workspace PATH.")
+                return True
+            print(json.dumps(workspace_runtime.permission_policy.summary(), indent=2))
+            return True
+
+        case "projectmap":
+            if workspace_runtime is None:
+                print("No workspace configured. Start with --workspace PATH.")
+                return True
+            print(json.dumps(build_project_map(workspace_runtime.workspace), indent=2))
+            return True
+
         case "clear":
             os.system("clear" if os.name != "nt" else "cls")
             return True
@@ -162,7 +284,12 @@ async def _handle_dot_command(
 # ---------------------------------------------------------------------------
 
 
-async def run_repl(agent: HermesAgent, memory: MemoryManager, skills: SkillManager) -> None:
+async def run_repl(
+    agent: HermesAgent,
+    memory: MemoryManager,
+    skills: SkillManager,
+    workspace_runtime: WorkspaceRuntime | None = None,
+) -> None:
     """Run the interactive REPL loop."""
     print(BANNER)
 
@@ -225,6 +352,7 @@ async def run_repl(agent: HermesAgent, memory: MemoryManager, skills: SkillManag
                 agent=agent,
                 memory=memory,
                 skills=skills,
+                workspace_runtime=workspace_runtime,
             )
             if not should_continue:
                 return
@@ -247,19 +375,7 @@ def main() -> None:
     # 1. Load environment (must come before arg parse for env var defaults)
     _load_env()
 
-    parser = argparse.ArgumentParser(
-        description="Hermes Lite — interactive AI assistant REPL",
-    )
-    parser.add_argument(
-        "--provider",
-        default=os.getenv("HERMES_PROVIDER", "deepseek"),
-        help="LLM provider (default: deepseek, or $HERMES_PROVIDER)",
-    )
-    parser.add_argument(
-        "--model",
-        default=os.getenv("HERMES_MODEL", "deepseek-chat"),
-        help="Model name (default: deepseek-chat, or $HERMES_MODEL)",
-    )
+    parser = build_parser()
     args = parser.parse_args()
 
     # 2. Check for API key
@@ -277,6 +393,7 @@ def main() -> None:
 
     tools = ToolRegistry()
     register_builtin_tools(tools)
+    workspace_runtime = create_workspace_runtime(args.workspace, tools)
 
     skills = SkillManager(base_dir="skills/")
     memory = MemoryManager()
@@ -284,22 +401,21 @@ def main() -> None:
     # 4. Create the agent
     agent = HermesAgent(
         config=config,
-        persona=(
-            "You are Hermes Agent, an intelligent AI assistant created by "
-            "Nous Research. You are helpful, knowledgeable, and direct. You "
-            "assist users with a wide range of tasks including answering "
-            "questions, writing and editing code, analyzing information, "
-            "creative work, and executing actions via your tools. You "
-            "communicate clearly, admit uncertainty when appropriate, and "
-            "prioritize being genuinely useful over being verbose."
+        persona=build_persona(
+            DEFAULT_PERSONA,
+            workspace=workspace_runtime.workspace if workspace_runtime else None,
+            permission_policy=(
+                workspace_runtime.permission_policy if workspace_runtime else None
+            ),
         ),
         tool_registry=tools,
         memory_manager=memory,
+        skill_manager=skills,
     )
 
     # 5. Run the REPL
     try:
-        asyncio.run(run_repl(agent, memory, skills))
+        asyncio.run(run_repl(agent, memory, skills, workspace_runtime=workspace_runtime))
     except KeyboardInterrupt:
         print("\nGoodbye!")
         sys.exit(0)
