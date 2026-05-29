@@ -7,15 +7,19 @@ produces a final text response.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, AsyncGenerator, Literal
 
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 
@@ -23,6 +27,8 @@ from hermes_lite.memory.manager import MemoryManager
 from hermes_lite.providers.adapters import ProviderConfig, create_agent
 from hermes_lite.skills.manager import SkillManager
 from hermes_lite.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class HermesAgent:
@@ -64,6 +70,7 @@ class HermesAgent:
         self._skills = skill_manager
         self._memory_inject_limit = memory_inject_limit
         self._defer_model_check = defer_model_check
+        self._last_messages: list[ModelMessage] = []
 
     @property
     def config(self) -> ProviderConfig:
@@ -84,6 +91,95 @@ class HermesAgent:
     def skills(self) -> SkillManager | None:
         """Return the skill manager, if configured."""
         return self._skills
+
+    @property
+    def last_messages(self) -> list[ModelMessage]:
+        """Return the message history from the most recent :meth:`run` or
+        :meth:`run_stream` call.
+
+        Pass this value as ``message_history`` on the next call to maintain
+        conversation continuity across invocations.
+        """
+        return self._last_messages
+
+    def _log_tool_failures(self, response_parts: list) -> None:
+        """Log any tool failures found in the response parts."""
+        for msg in response_parts:
+            for part in msg.parts:
+                if isinstance(part, ToolReturnPart):
+                    content = str(part.content) if part.content else ""
+                    if "error" in content.lower() or "failed" in content.lower():
+                        tool_name = getattr(part, "tool_name", "unknown")
+                        logger.warning("tool_failed tool=%s error=%s", tool_name, content[:200])
+
+    async def _call_with_retry(
+        self,
+        agent: Agent,
+        messages: list[ModelMessage],
+        output_type: type,
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+    ) -> Any:
+        """Call agent.run() with timeout and retry for transient errors.
+
+        Retries on timeout (120s) and HTTP 429/503 errors with exponential
+        backoff.  Raises the last error if all retries are exhausted.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                result = await asyncio.wait_for(
+                    agent.run(
+                        user_prompt=None,
+                        message_history=messages,
+                        output_type=output_type,
+                    ),
+                    timeout=120,
+                )
+                return result
+            except asyncio.TimeoutError:
+                last_exc = RuntimeError("LLM call timed out after 120s")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "LLM call timed out, retrying in %.1fs (attempt %d/%d)",
+                        delay, attempt + 2, max_retries,
+                    )
+                    await asyncio.sleep(delay)
+            except ModelHTTPError as exc:
+                last_exc = exc
+                if exc.status_code in (429, 503):
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            "LLM call failed HTTP %d, retrying in %.1fs (attempt %d/%d)",
+                            exc.status_code, delay, attempt + 2, max_retries,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                raise
+            except Exception as exc:
+                # Check for HTTP status in nested exceptions
+                http_status = None
+                inner = exc
+                while inner is not None:
+                    http_status = getattr(inner, "status_code", None)
+                    if http_status in (429, 503):
+                        break
+                    inner = getattr(inner, "__cause__", None)
+                if http_status in (429, 503):
+                    last_exc = exc
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            "LLM call failed HTTP %d (nested), retrying in %.1fs (attempt %d/%d)",
+                            http_status, delay, attempt + 2, max_retries,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                raise
+
+        raise last_exc or RuntimeError("LLM call failed after all retries")
 
     def _build_agent(self) -> Agent[None, str]:
         """Create (or recreate) the underlying pydantic-ai Agent.
@@ -137,7 +233,8 @@ class HermesAgent:
         user_input: str,
         max_turns: int = 50,
         result_type: type | None = None,
-    ) -> str:
+        message_history: list[ModelMessage] | None = None,
+    ) -> tuple[str, list[ModelMessage]]:
         """Run the agent with a user prompt in a multi-turn loop.
 
         The loop:
@@ -150,20 +247,31 @@ class HermesAgent:
             user_input: The user's message.
             max_turns: Maximum tool-call iterations before forcing a response.
             result_type: Optional Pydantic model for structured output.
+            message_history: Optional pre-existing message history to continue
+                a conversation.  If provided, the new user_input is appended
+                to it instead of building a fresh message list from scratch.
 
         Returns:
-            Final text response from the model.
+            Tuple of (final_text_response, final_message_list).
+            The final_message_list can be passed back as ``message_history``
+            on the next call to maintain conversation continuity.
         """
         # Rebuild system prompt in case memory/tools changed
         system_prompt = self.build_system_prompt()
 
-        # Build initial message history
-        messages: list[ModelMessage] = [
-            ModelRequest(parts=[SystemPromptPart(content=system_prompt)]),
-            ModelRequest(parts=[UserPromptPart(content=user_input)]),
-        ]
+        # Build or extend message history
+        if message_history is not None:
+            messages = list(message_history) + [
+                ModelRequest(parts=[UserPromptPart(content=user_input)]),
+            ]
+        else:
+            messages: list[ModelMessage] = [
+                ModelRequest(parts=[SystemPromptPart(content=system_prompt)]),
+                ModelRequest(parts=[UserPromptPart(content=user_input)]),
+            ]
 
         turn = 0
+        result: Any = None
         while turn < max_turns:
             turn += 1
 
@@ -171,12 +279,15 @@ class HermesAgent:
             # newly registered tools (via the @agent.tool decorator).
             agent = self._build_agent()
 
-            # Call the pydantic-ai agent with accumulated history
-            result = await agent.run(
-                user_prompt=None,
-                message_history=messages,
-                output_type=result_type if result_type else str,
+            # Call the pydantic-ai agent with accumulated history (with timeout + retry)
+            result = await self._call_with_retry(
+                agent,
+                messages,
+                result_type if result_type else str,
             )
+
+            # Log any tool failures
+            self._log_tool_failures(result.all_messages())
 
             # Use result.all_messages() — pydantic-ai guarantees correct
             # message ordering (tool results immediately follow tool_calls).
@@ -186,7 +297,12 @@ class HermesAgent:
             response_parts = result.new_messages()
             if not response_parts:
                 # If nothing was returned, try to use result.output directly
-                return str(result.output) if result.output else ""
+                final = str(result.output) if result.output else ""
+                logger.info(
+                    "turn=%d tool_calls=0 text_len=%d (empty response, fallback)",
+                    turn, len(final),
+                )
+                return final, messages
 
             # Collect tool calls and text from response
             has_tool_calls = False
@@ -199,9 +315,17 @@ class HermesAgent:
                     elif isinstance(part, TextPart):
                         text_parts.append(part.content)
 
+            tool_count = sum(
+                1 for msg in response_parts
+                for part in msg.parts
+                if isinstance(part, ToolCallPart)
+            )
+            text_len = sum(len(t) for t in text_parts)
+            logger.info("turn=%d tool_calls=%d text_len=%d", turn, tool_count, text_len)
+
             # If we have text output and no tool calls, we're done
             if text_parts and not has_tool_calls:
-                return "\n".join(text_parts)
+                return "\n".join(text_parts), messages
 
             # If there are tool calls, pydantic-ai has already executed
             # them and result.all_messages() includes everything in order.
@@ -211,95 +335,74 @@ class HermesAgent:
 
             # No tool calls and no text — force break
             if result.output:
-                return str(result.output)
+                return str(result.output), messages
             break
 
+        logger.warning("max_turns=%d reached — forcing response", max_turns)
         # Fallback: use final result output
-        return str(result.output) if result.output else ""
+        final = str(result.output) if result and result.output else ""
+        return final, messages
 
     async def run_stream(
         self,
         user_input: str,
         max_turns: int = 50,
+        message_history: list[ModelMessage] | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Stream text output from the agent, yielding chunks as they are produced.
+        """Stream text output token-by-token using pydantic-ai native streaming.
 
-        The streaming loop is identical to :meth:`run` but yields text parts
-        from each LLM turn as soon as they arrive.  Tool calls are handled
-        transparently by pydantic-ai (auto-executed) and do not produce
-        visible output — only final text responses are yielded.
+        Uses ``agent.run_stream()`` under the hood to produce true streaming
+        deltas rather than buffered per-turn chunks.  Tool calls are handled
+        transparently by pydantic-ai in the background.
+
+        After the generator is exhausted, the final message history is available
+        via the :attr:`last_messages` attribute for use in subsequent calls.
 
         Args:
             user_input: The user's message.
             max_turns: Maximum tool-call iterations before forcing a response.
+            message_history: Optional pre-existing message history to continue
+                a conversation.
 
         Yields:
-            Text chunks as they are produced by the model.
+            Text chunks (typically token-level) as they are produced.
         """
         # Rebuild system prompt in case memory/tools changed
         system_prompt = self.build_system_prompt()
 
-        # Build initial message history
-        messages: list[ModelMessage] = [
-            ModelRequest(parts=[SystemPromptPart(content=system_prompt)]),
-            ModelRequest(parts=[UserPromptPart(content=user_input)]),
-        ]
+        # Build or extend message history
+        if message_history is not None:
+            messages = list(message_history) + [
+                ModelRequest(parts=[UserPromptPart(content=user_input)]),
+            ]
+        else:
+            messages: list[ModelMessage] = [
+                ModelRequest(parts=[SystemPromptPart(content=system_prompt)]),
+                ModelRequest(parts=[UserPromptPart(content=user_input)]),
+            ]
 
-        turn = 0
-        while turn < max_turns:
-            turn += 1
+        # Rebuild agent once — pydantic-ai handles the full multi-turn
+        # execution including tool calls within run_stream().
+        agent = self._build_agent()
 
-            # Rebuild the pydantic agent every turn to pick up any
-            # newly registered tools.
-            agent = self._build_agent()
-
-            # Call the pydantic-ai agent with accumulated history
-            result = await agent.run(
+        try:
+            async with agent.run_stream(
                 user_prompt=None,
                 message_history=messages,
                 output_type=str,
-            )
-
-            # Use result.all_messages() for correct message ordering
-            messages = result.all_messages()
-
-            # Extract the response parts
-            response_parts = result.new_messages()
-            if not response_parts:
-                if result.output:
-                    yield str(result.output)
-                return
-
-            # Collect tool calls and text from response
-            has_tool_calls = False
-            text_parts: list[str] = []
-
-            for msg in response_parts:
-                for part in msg.parts:
-                    if isinstance(part, ToolCallPart):
-                        has_tool_calls = True
-                    elif isinstance(part, TextPart):
-                        text_parts.append(part.content)
-
-            # If we have text output and no tool calls, yield and finish
-            if text_parts and not has_tool_calls:
-                yield "\n".join(text_parts)
-                return
-
-            # If there are tool calls, pydantic-ai has already executed
-            # them and result.all_messages() includes everything in order.
-            # Continue the loop with the updated message history.
-            if has_tool_calls:
-                continue
-
-            # No tool calls and no text — force break
-            if result.output:
-                yield str(result.output)
-            break
-
-        # Fallback: yield final result output
-        if result.output:
-            yield str(result.output)
+            ) as streamed_result:
+                logger.info("stream_start text_len=%d", len(user_input))
+                async for chunk in streamed_result.stream_text(
+                    delta=True, debounce_by=None
+                ):
+                    yield chunk
+                # After streaming completes, capture final messages
+                final_messages = streamed_result.all_messages()
+                self._last_messages = final_messages
+                logger.info("stream_end total_messages=%d", len(final_messages))
+        except Exception:
+            logger.exception("stream_error")
+            raise
 
     def tool(
         self,

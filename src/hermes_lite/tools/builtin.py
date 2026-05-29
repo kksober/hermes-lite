@@ -70,32 +70,62 @@ def run_shell(command: str) -> str:
         return f"Error executing command: {exc}"
 
 
-def read_file(path: str) -> str:
-    """Read a file and return its content with line numbers (first 500 lines).
+def read_file(path: str, offset: int = 1, limit: int = 500) -> str:
+    """Read a text file and return paginated content with line numbers.
 
     Args:
         path: Path to the file to read.
+        offset: Starting line number (1-indexed, default: 1).
+        limit: Maximum number of lines to return (default: 500).
 
     Returns:
-        File content with 6-digit line numbers, or an error message.
+        JSON string with keys: content, total_lines, offset, limit.
     """
+    import json
+
     try:
         p = Path(path).expanduser().resolve()
         if not p.exists():
-            return f"Error: File not found: {path}"
+            return json.dumps({
+                "error": f"File not found: {path}",
+                "content": "",
+                "total_lines": 0,
+                "offset": offset,
+                "limit": limit,
+            })
         if p.is_dir():
-            return f"Error: Path is a directory: {path}"
+            return json.dumps({
+                "error": f"Path is a directory: {path}",
+                "content": "",
+                "total_lines": 0,
+                "offset": offset,
+                "limit": limit,
+            })
         content = p.read_text(encoding="utf-8", errors="replace")
         lines = content.split("\n")
-        truncated = len(lines) > 500
-        if truncated:
-            lines = lines[:500]
-        numbered = [f"{i + 1:>6}|{line}" for i, line in enumerate(lines)]
-        if truncated:
-            numbered.append("... (truncated — showing first 500 lines)")
-        return "\n".join(numbered)
+        total_lines = len(lines)
+
+        # Clamp offset to valid range
+        start = max(1, min(offset, total_lines)) - 1  # 0-indexed
+        end = min(start + limit, total_lines)
+        page_lines = lines[start:end]
+
+        numbered = [f"{start + i + 1:>6}|{line}" for i, line in enumerate(page_lines)]
+        result = {
+            "content": "\n".join(numbered),
+            "total_lines": total_lines,
+            "offset": start + 1,
+            "limit": limit,
+        }
+        return json.dumps(result)
     except Exception as exc:
-        return f"Error reading file: {exc}"
+        return json.dumps({
+            "error": f"Error reading file: {exc}",
+            "content": "",
+            "total_lines": 0,
+            "offset": offset,
+            "limit": limit,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -308,13 +338,21 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
         name="read_file",
         schema={
             "description": (
-                "Read a file and return its content with line numbers. "
-                "Shows the first 500 lines."
+                "Read a text file and return paginated content with line numbers. "
+                "Returns a JSON object with content, total_lines, offset, and limit."
             ),
             "properties": {
                 "path": {
                     "type": "string",
                     "description": "Path to the file to read.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Starting line number (1-indexed, default: 1).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum lines to return (default: 500, max: 2000).",
                 },
             },
             "required": ["path"],

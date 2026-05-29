@@ -9,6 +9,7 @@ Usage::
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import signal
@@ -202,6 +203,7 @@ async def run_repl(agent: HermesAgent, memory: MemoryManager, skills: SkillManag
         _readline = _read_line
 
     # Main loop
+    message_history = None
     while True:
         try:
             user_input = (await _readline()).strip()
@@ -231,7 +233,9 @@ async def run_repl(agent: HermesAgent, memory: MemoryManager, skills: SkillManag
         # Send to agent
         print()  # blank line before response
         try:
-            response = await agent.run(user_input)
+            response, message_history = await agent.run(
+                user_input, message_history=message_history
+            )
             print(response)
         except Exception as exc:
             print(f"[ERROR] {exc}")
@@ -240,20 +244,35 @@ async def run_repl(agent: HermesAgent, memory: MemoryManager, skills: SkillManag
 
 def main() -> None:
     """CLI entry point — sets up the agent and starts the REPL."""
-    # 1. Load environment
+    # 1. Load environment (must come before arg parse for env var defaults)
     _load_env()
+
+    parser = argparse.ArgumentParser(
+        description="Hermes Lite — interactive AI assistant REPL",
+    )
+    parser.add_argument(
+        "--provider",
+        default=os.getenv("HERMES_PROVIDER", "deepseek"),
+        help="LLM provider (default: deepseek, or $HERMES_PROVIDER)",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.getenv("HERMES_MODEL", "deepseek-chat"),
+        help="Model name (default: deepseek-chat, or $HERMES_MODEL)",
+    )
+    args = parser.parse_args()
 
     # 2. Check for API key
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         print("Warning: DEEPSEEK_API_KEY not set in environment or .env file.")
-        print("Set it with:  export DEEPSEEK_API_KEY=sk-...")
+        print("Set it with:  export DEEPSEEK_API_KEY=***")
         sys.exit(1)
 
     # 3. Create provider config and agent building blocks
     config = ProviderConfig(
-        provider="deepseek",
-        model="deepseek-chat",
+        provider=args.provider,  # type: ignore[arg-type]
+        model=args.model,
     )
 
     tools = ToolRegistry()

@@ -16,6 +16,7 @@ from typing import AsyncGenerator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -48,8 +49,9 @@ def _load_env() -> None:
 class ChatRequest(BaseModel):
     """Request body for POST /chat."""
 
-    message: str
+    message: str = Field(..., max_length=65536)
     stream: bool = False
+    session_id: str | None = None
 
 
 class MemoryAddRequest(BaseModel):
@@ -89,11 +91,21 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# Add CORS middleware — permissive by default for development
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 _agent: HermesAgent | None = None
 _memory: MemoryManager | None = None
 _skills: SkillManager | None = None
 _agent_lock = asyncio.Lock()
 _agent_initialised = False
+_session_histories: dict[str, list] = {}
 
 
 async def _get_agent() -> HermesAgent:
@@ -121,9 +133,12 @@ async def _get_agent() -> HermesAgent:
                 "Set it with: export DEEPSEEK_API_KEY=***"
             )
 
+        provider = os.getenv("HERMES_PROVIDER", "deepseek")
+        model = os.getenv("HERMES_MODEL", "deepseek-chat")
+
         config = ProviderConfig(
-            provider="deepseek",
-            model="deepseek-chat",
+            provider=provider,  # type: ignore[arg-type]
+            model=model,
         )
 
         tools = ToolRegistry()
@@ -183,8 +198,8 @@ async def health() -> HealthResponse:
             model=f"{agent.config.provider}:{agent.config.model}",
             tools=tool_names,
         )
-    except Exception as exc:
-        return HealthResponse(status="error", model="", tools=str(exc))
+    except Exception:
+        return HealthResponse(status="unhealthy", model="", tools="")
 
 
 @app.post("/chat")
@@ -193,16 +208,26 @@ async def chat(req: ChatRequest):
 
     Set ``stream: true`` in the request body to receive a Server-Sent Events
     stream.  Each SSE event contains a JSON object with a ``text`` field.
+
+    Pass ``session_id`` to maintain conversation context across requests.
     """
     agent = await _get_agent()
+
+    # Resolve message history for this session
+    history_key = req.session_id or "default"
+    message_history = _session_histories.get(history_key)
 
     if req.stream:
         async def event_stream() -> AsyncGenerator[str, None]:
             """SSE generator yielding text chunks from the agent."""
             try:
-                async for chunk in agent.run_stream(req.message):
+                async for chunk in agent.run_stream(
+                    req.message, message_history=message_history
+                ):
                     payload = json.dumps({"text": chunk})
                     yield f"data: {payload}\n\n"
+                # Store final messages after stream completes
+                _session_histories[history_key] = agent.last_messages
                 yield "data: [DONE]\n\n"
             except Exception as exc:
                 error_payload = json.dumps({"error": str(exc)})
@@ -220,7 +245,10 @@ async def chat(req: ChatRequest):
 
     # Non-streaming path
     try:
-        response = await agent.run(req.message)
+        response, final_messages = await agent.run(
+            req.message, message_history=message_history
+        )
+        _session_histories[history_key] = final_messages
         return ChatResponse(response=response)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -284,6 +312,29 @@ async def get_sessions():
     from hermes_lite.sessions.manager import SessionManager
     sm = SessionManager(db_path=sessions_db)
     return {"sessions": sm.list_recent()}
+
+
+@app.get("/sessions/{session_id}/history")
+async def get_session_history(session_id: str):
+    """Return the in-memory message history for a session.
+
+    The history is maintained across /chat calls that use the same
+    ``session_id``.  Returns an empty list if the session has no history.
+    """
+    history = _session_histories.get(session_id, [])
+    # Serialize messages to a JSON-safe format
+    serialized = []
+    for msg in history:
+        parts_data = []
+        for part in getattr(msg, "parts", []):
+            part_type = type(part).__name__
+            part_content = getattr(part, "content", str(part))
+            parts_data.append({"type": part_type, "content": str(part_content)})
+        serialized.append({
+            "kind": getattr(msg, "kind", "unknown"),
+            "parts": parts_data,
+        })
+    return {"session_id": session_id, "message_count": len(history), "messages": serialized}
 
 
 # ---------------------------------------------------------------------------
