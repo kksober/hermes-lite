@@ -210,6 +210,9 @@ async def _handle_dot_command(
                 print("  /deny <rule>     Deny a pending permission category")
                 print("  /audit           Show audit log summary")
                 print("  /sessions        List background command sessions")
+                print("  /recent [n]      Show recently changed files")
+                print("  /testfor <path>  Find test files for a source file")
+                print("  /repomap         Token-aware repository overview")
                 print("  /projectmap      Show project structure summary")
                 print("  /plan <task>     Generate a subagent plan (DRY-RUN)")
                 print("  /todo            Show agent todo (stub)")
@@ -371,6 +374,46 @@ async def _handle_dot_command(
                 print("Usage: /resume <session-id>")
                 return True
             print(f"(resume session {sid} not yet implemented)")
+            return True
+
+        case "recent":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            from hermes_lite.coding.context import recent_changes
+            count = int(args.strip()) if args.strip() else 10
+            result = recent_changes(workspace_runtime.workspace, count=count)
+            if result["ok"]:
+                for f in result["files"]:
+                    print(f"  {f['path']}")
+                print(f"  (source: {result['source']})")
+            return True
+
+        case "testfor":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            from hermes_lite.coding.context import find_test_files
+            path = args.strip()
+            if not path:
+                print("Usage: /testfor <source-file-path>")
+                return True
+            result = find_test_files(workspace_runtime.workspace, path)
+            if result["ok"]:
+                if result["test_files"]:
+                    for tf in result["test_files"]:
+                        print(f"  [{tf['score']}] {tf['path']} ({tf.get('language', '?')})")
+                else:
+                    print("  (no test files found)")
+            return True
+
+        case "repomap":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            from hermes_lite.coding.context import repo_map_summary
+            result = repo_map_summary(workspace_runtime.workspace)
+            print(json.dumps(result, indent=2))
             return True
 
         case "clear":

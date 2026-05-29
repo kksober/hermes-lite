@@ -5,11 +5,24 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from hermes_lite.coding.context import build_project_map, list_files, rank_files, search_text
+from hermes_lite.coding.context import (
+    build_project_map,
+    find_test_files,
+    list_files,
+    rank_files,
+    recent_changes,
+    repo_map_summary,
+    search_text,
+)
 from hermes_lite.coding.diagnostics import diagnose_python, extract_python_symbols
 from hermes_lite.coding.extensibility import hook_status, load_external_tools, load_mcp_servers
 from hermes_lite.coding.git import GitClient
-from hermes_lite.coding.patches import apply_text_patch
+from hermes_lite.coding.patches import (
+    apply_text_patch,
+    apply_unified_diff,
+    diff_summary,
+    patch_dry_run,
+)
 from hermes_lite.coding.permissions import PermissionPolicy
 from hermes_lite.coding.sessions import SessionManager
 from hermes_lite.coding.shell import CommandRunner
@@ -158,6 +171,58 @@ def register_coding_tools(
         toolset="coding",
     )
     registry.register(
+        name="apply_unified_diff",
+        schema={
+            "description": "Apply a unified diff patch to a workspace file (multi-hunk).",
+            "properties": {
+                "path": {"type": "string"},
+                "diff_text": {"type": "string"},
+                "dry_run": {"type": "boolean"},
+                "fuzzy": {"type": "integer"},
+            },
+            "required": ["path", "diff_text"],
+        },
+        handler=as_json(
+            lambda path, diff_text, dry_run=False, fuzzy=0: apply_unified_diff(
+                workspace, path, diff_text, dry_run=dry_run, fuzzy=fuzzy,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="patch_dry_run",
+        schema={
+            "description": "Validate a unified diff applies cleanly without writing.",
+            "properties": {
+                "path": {"type": "string"},
+                "diff_text": {"type": "string"},
+                "fuzzy": {"type": "integer"},
+            },
+            "required": ["path", "diff_text"],
+        },
+        handler=as_json(
+            lambda path, diff_text, fuzzy=0: patch_dry_run(
+                workspace, path, diff_text, fuzzy=fuzzy,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="diff_summary",
+        schema={
+            "description": "Show added/removed line counts and diff preview for a file.",
+            "properties": {
+                "path": {"type": "string"},
+                "old_content": {"type": "string"},
+            },
+            "required": ["path"],
+        },
+        handler=as_json(
+            lambda path, old_content=None: diff_summary(workspace, path, old_content)
+        ),
+        toolset="coding",
+    )
+    registry.register(
         name="run_command",
         schema={
             "description": "Run a non-destructive command inside the workspace.",
@@ -205,6 +270,43 @@ def register_coding_tools(
             "required": ["query"],
         },
         handler=as_json(lambda query, limit=20: rank_files(workspace, query, limit=limit)),
+        toolset="coding",
+    )
+    registry.register(
+        name="recent_changes",
+        schema={
+            "description": "List recently modified files (git log or filesystem mtime).",
+            "properties": {"count": {"type": "integer"}},
+            "required": [],
+        },
+        handler=as_json(lambda count=20: recent_changes(workspace, count=count)),
+        toolset="coding",
+    )
+    registry.register(
+        name="find_test_files",
+        schema={
+            "description": "Find test files likely associated with a source file.",
+            "properties": {"source_path": {"type": "string"}},
+            "required": ["source_path"],
+        },
+        handler=as_json(lambda source_path: find_test_files(workspace, source_path)),
+        toolset="coding",
+    )
+    registry.register(
+        name="repo_map",
+        schema={
+            "description": "Token-aware compact repository overview for LLM context.",
+            "properties": {
+                "token_budget": {"type": "integer"},
+                "include_recent": {"type": "boolean"},
+            },
+            "required": [],
+        },
+        handler=as_json(
+            lambda token_budget=2000, include_recent=True: repo_map_summary(
+                workspace, token_budget=token_budget, include_recent=include_recent,
+            )
+        ),
         toolset="coding",
     )
     registry.register(
