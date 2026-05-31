@@ -44,9 +44,10 @@ from hermes_lite.coding.patches import (
     apply_text_patch,
     apply_unified_diff,
     diff_summary,
+    edit_batch,
     patch_dry_run,
 )
-from hermes_lite.coding.permissions import PermissionPolicy
+from hermes_lite.coding.permissions import PermissionDecision, PermissionPolicy
 from hermes_lite.coding.sessions import SessionManager
 from hermes_lite.coding.shell import CommandRunner
 from hermes_lite.coding.subagents import (
@@ -1489,6 +1490,59 @@ def register_coding_tools(
                 workspace, policy, path, old_text, new_text, replace_all=replace_all, fuzzy=fuzzy,
             )
         ),
+        toolset="coding",
+    )
+
+    # -- edit_batch (multi-file atomic) -----------------------------------
+
+    def _edit_batch_with_confirm(ops: list[dict[str, Any]]) -> dict[str, object]:
+        """Atomic batch edit with permission check and confirmation."""
+        # Check permissions for all files
+        for op in ops:
+            path = str(op.get("path", ""))
+            if not path:
+                continue
+            check = workspace.resolve(path, operation="write")
+            decision = policy.decide_write(check)
+            if decision.denied:
+                return {"ok": False, "error": "permission_denied", "path": path, "reason": decision.reason}
+        # For interactive mode, show preview
+        if policy.interactive and policy.confirm is not None:
+            preview_lines = [f"Batch edit — {len(ops)} file(s):"]
+            for op in ops:
+                preview_lines.append(f"  {op.get('path', '?')}: -{str(op.get('old_text', ''))[:80]}  +{str(op.get('new_text', ''))[:80]}")
+            decision = PermissionDecision(
+                action="ask", path="<batch>", operation="write",
+                reason="batch_edit_confirm", edit_preview="\n".join(preview_lines),
+            )
+            if not policy.confirm(decision):
+                return {"ok": False, "error": "edit_rejected", "message": "Batch edit was not confirmed."}
+        return edit_batch(workspace, ops)
+
+    registry.register(
+        name="edit_batch",
+        schema={
+            "description": "Atomically edit multiple files. All edits are validated before any file is written.",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "File path."},
+                            "old_text": {"type": "string", "description": "Text to find."},
+                            "new_text": {"type": "string", "description": "Replacement text."},
+                            "replace_all": {"type": "boolean", "description": "Replace all occurrences (default false)."},
+                            "fuzzy": {"type": "boolean", "description": "Use fuzzy matching (default true)."},
+                        },
+                        "required": ["path", "old_text", "new_text"],
+                    },
+                    "description": "List of edit operations.",
+                },
+            },
+            "required": ["edits"],
+        },
+        handler=as_json(lambda edits: _edit_batch_with_confirm(edits)),
         toolset="coding",
     )
 

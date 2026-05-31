@@ -258,6 +258,10 @@ class HermesAgent:
         self._memory_inject_limit = memory_inject_limit
         self._defer_model_check = defer_model_check
         self._last_messages: list[ModelMessage] = []
+        # Turn tracking and reflection
+        self._turn_count = 0
+        self._reflection_interval = 5
+        self._history_snapshot: list[ModelMessage] | None = None
         # Token usage tracking
         self._total_prompt_tokens = 0
         self._total_completion_tokens = 0
@@ -417,6 +421,37 @@ class HermesAgent:
         """Access the ContextWindow tracker (for inspection/CLI)."""
         return self._context_window
 
+    @property
+    def turn_count(self) -> int:
+        """Number of completed turns in this session."""
+        return self._turn_count
+
+    @property
+    def reflection_interval(self) -> int:
+        """Turns between automatic reflection prompts."""
+        return self._reflection_interval
+
+    @reflection_interval.setter
+    def reflection_interval(self, value: int) -> None:
+        self._reflection_interval = max(1, value)
+
+    def _snapshot_history(self) -> None:
+        """Save the current message history for potential undo."""
+        self._history_snapshot = list(self._last_messages) if self._last_messages else None
+
+    def undo_last_turn(self) -> dict[str, object]:
+        """Restore message history to the snapshot taken before the last turn.
+
+        Returns a status dict indicating whether undo was possible.
+        """
+        if self._history_snapshot is None:
+            return {"ok": False, "error": "no_snapshot", "message": "No snapshot to restore."}
+        self._last_messages = self._history_snapshot
+        self._history_snapshot = None
+        if self._turn_count > 0:
+            self._turn_count -= 1
+        return {"ok": True, "message": f"Restored to turn {self._turn_count}.", "turn": self._turn_count}
+
     async def _call_with_retry(
         self,
         agent: Agent,
@@ -557,6 +592,22 @@ class HermesAgent:
             parts.append(error_prompt)
 
         return "\n".join(parts)
+
+    def _build_reflection_prompt(self) -> str:
+        """Build a lightweight reflection prompt injected every N turns.
+
+        The prompt encourages the agent to consider creating or updating skills,
+        abstracting reusable patterns, and noting mistakes to avoid.
+        """
+        return (
+            "\n<reflection>\n"
+            "You have completed another round of work. Consider:\n"
+            "1. Did you learn a pattern or convention worth remembering? "
+            "If so, use skill_manage to create or update a skill.\n"
+            "2. Is there reusable code you should abstract? If so, suggest it.\n"
+            "3. Any mistakes you made that future-you should avoid?\n"
+            "</reflection>\n"
+        )
 
     async def run(
         self,
@@ -714,6 +765,9 @@ class HermesAgent:
         # Rebuild system prompt in case memory/tools changed
         system_prompt = self.build_system_prompt()
 
+        # Snapshot current history for potential undo
+        self._snapshot_history()
+
         # Build or extend message history
         if message_history is not None:
             messages = list(message_history) + [
@@ -743,7 +797,13 @@ class HermesAgent:
                 # After streaming completes, capture final messages
                 final_messages = streamed_result.all_messages()
                 self._last_messages = final_messages
-                logger.info("stream_end total_messages=%d", len(final_messages))
+                self._turn_count += 1
+                # If reflection is due, yield the reflection prompt as an extra chunk
+                if self._turn_count > 0 and self._turn_count % self._reflection_interval == 0:
+                    reflection = self._build_reflection_prompt()
+                    if reflection:
+                        yield "\n\n" + reflection
+                logger.info("stream_end total_messages=%d turn=%d", len(final_messages), self._turn_count)
         except Exception:
             logger.exception("stream_error")
             raise

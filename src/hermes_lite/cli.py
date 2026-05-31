@@ -251,6 +251,9 @@ async def _handle_dot_command(
                 print("  /todo [text]     List or create todo items")
                 print("  /usage           Show token usage for this session")
                 print("  /clear           Clear conversation history")
+                print("  /undo            Undo the last conversation turn")
+                print("  /retry           Retry the last user input after undo")
+                print("  /compact         Manually compress conversation context")
                 print("  /notify [msg]    Send a desktop notification")
                 print("  /run             Resume agent execution stub")
                 print("  /resume <id>     Resume a command session")
@@ -504,6 +507,33 @@ async def _handle_dot_command(
                 print(f"  Added readonly reference: {ref_root}")
             return True
 
+        case "undo":
+            result = agent.undo_last_turn()
+            if result.get("ok"):
+                print(f"  {result['message']}")
+            else:
+                print(f"  {result.get('message', 'Nothing to undo.')}")
+            return True
+
+        case "compact":
+            try:
+                msg_dicts = _model_messages_to_dicts(agent.last_messages)
+            except Exception:
+                msg_dicts = []
+            if not msg_dicts:
+                print("  No messages to compress.")
+                return True
+            before_ratio = agent.context_window.usage_ratio(msg_dicts)
+            print(f"  Context before: {before_ratio:.0%} of {agent.context_window.max_tokens:,} tokens")
+            if not agent.context_window.needs_compression(msg_dicts):
+                print("  Context is below compression threshold — no compression needed.")
+                return True
+            compressed = agent.context_window.compress_if_needed(msg_dicts, agent.config.model)
+            after_ratio = agent.context_window.usage_ratio(compressed)
+            print(f"  Context after:  {after_ratio:.0%} of {agent.context_window.max_tokens:,} tokens")
+            print(f"  Compressions:   {agent.context_window.compress_count}")
+            return True
+
         case "clear":
             result = agent.clear_context()
             print(f"  {result['message']}")
@@ -749,6 +779,7 @@ async def run_repl(
 
     # Main loop
     message_history = None
+    _last_user_input: str | None = None
     while True:
         try:
             user_input = (await _readline()).strip()
@@ -758,6 +789,22 @@ async def run_repl(
 
         if not user_input:
             continue
+
+        # /retry — undo last turn and resend previous input
+        if user_input == "/retry":
+            result = agent.undo_last_turn()
+            if result.get("ok"):
+                if _last_user_input is not None:
+                    print(f"  Retrying: {_last_user_input[:100]}{'...' if len(_last_user_input) > 100 else ''}")
+                    agent._pending_resume_messages = None
+                    user_input = _last_user_input
+                    # Fall through to normal agent processing below
+                else:
+                    print("  No previous input to retry.")
+                    continue
+            else:
+                print(f"  {result.get('message', 'Nothing to undo.')}")
+                continue
 
         # Slash commands
         if user_input.startswith("/"):
@@ -782,6 +829,9 @@ async def run_repl(
         print()  # blank line before response
         try:
             from hermes_lite.coding.terminal import gray, spinner_chars
+
+            # Save raw input for /retry
+            _last_user_input = user_input
 
             # Inject per-turn context into user message
             if workspace_runtime is not None:

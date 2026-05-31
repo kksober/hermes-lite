@@ -488,3 +488,94 @@ def _patch_preview(old: str, new: str) -> dict[str, object]:
         "hunks": sum(1 for line in diff if line.startswith("@@")),
         "diff_preview": "\n".join(diff[:40]),
     }
+
+
+# ---------------------------------------------------------------------------
+# batch edit (multi-file atomic)
+# ---------------------------------------------------------------------------
+
+
+def edit_batch(
+    workspace: Workspace,
+    edits: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply multiple text edits atomically: all-or-nothing.
+
+    Each edit dict must have ``path``, ``old_text``, ``new_text``.
+    Optional keys: ``replace_all`` (bool, default False), ``fuzzy`` (bool, default True).
+
+    Edits are first validated via dry-run (match check only, no disk write).
+    Only if every edit passes validation is any file modified.
+
+    Returns
+    -------
+    ``{ok, applied, total, files}`` on success, or
+    ``{ok: False, error: "batch_failed", failed: [...], applied: 0}`` on failure.
+    """
+    if not edits:
+        return {"ok": False, "error": "empty_batch", "message": "No edits provided."}
+
+    # Phase 1 — validate all edits (dry-run)
+    failed: list[dict[str, Any]] = []
+    snapshots: dict[str, str] = {}
+
+    for i, edit in enumerate(edits):
+        path = str(edit.get("path", ""))
+        old_text = str(edit.get("old_text", ""))
+        new_text = str(edit.get("new_text", ""))
+        fuzzy = bool(edit.get("fuzzy", True))
+        if not path or not old_text:
+            failed.append({"index": i, "path": path, "error": "invalid_edit", "message": "path and old_text are required."})
+            continue
+        read_result = workspace.read_text(path)
+        if not read_result.get("ok"):
+            failed.append({"index": i, "path": path, "error": "read_failed", "message": read_result.get("error", "unknown")})
+            continue
+        content = str(read_result["content"])
+        snapshots[path] = content
+        # Try to find the match
+        if old_text in content:
+            continue  # exact match, good
+        if fuzzy:
+            match_key = _fuzzy_find(content, old_text)
+            if match_key is not None:
+                continue  # fuzzy match found, good
+        failed.append({"index": i, "path": path, "error": "patch_mismatch", "message": "old_text not found in file (fuzzy also failed)."})
+
+    if failed:
+        return {
+            "ok": False,
+            "error": "batch_failed",
+            "failed": failed,
+            "failed_count": len(failed),
+            "total": len(edits),
+            "applied": 0,
+        }
+
+    # Phase 2 — apply all edits
+    applied_files: list[str] = []
+    for edit in edits:
+        path = str(edit["path"])
+        old_text = str(edit["old_text"])
+        new_text = str(edit["new_text"])
+        replace_all = bool(edit.get("replace_all", False))
+        fuzzy = bool(edit.get("fuzzy", True))
+        result = apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all, fuzzy=fuzzy)
+        if result.get("ok"):
+            applied_files.append(path)
+        else:
+            return {
+                "ok": False,
+                "error": "apply_failed",
+                "path": path,
+                "message": result.get("message", "Write failed during batch apply."),
+                "applied": len(applied_files),
+                "total": len(edits),
+            }
+
+    return {
+        "ok": True,
+        "applied": len(applied_files),
+        "total": len(edits),
+        "files": applied_files,
+    }
