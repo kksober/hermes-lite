@@ -7,6 +7,7 @@
 
 命名规则：`YYYY-MM-DD-<主题>-review.md`
 
-| 日期 | 审查 | 评分 |
-|------|------|------|
-| 2026-05-27 | [Coding Agent 能力审查](reviews/2026-05-27-coding-agent-review.md) | B+ |
+| 日期 | 审查 | 评分 | 分支 |
+|------|------|------|------|
+| 2026-05-31 | [Coding Agent 能力审查 Phase 2](reviews/2026-05-31-coding-agent-review-phase2.md) | A- | codex/coding-agent-evolution |
+| 2026-05-27 | [Coding Agent 能力审查](reviews/2026-05-27-coding-agent-review.md) | B+ | main |
