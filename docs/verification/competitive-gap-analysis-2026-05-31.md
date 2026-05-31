@@ -1,8 +1,9 @@
 # 竞品差距分析
 
 **日期**: 2026-05-31
+**完成日期**: 2026-05-31
 **对比基线**: Claude Code、OpenCode、Aider、Cursor、GitHub Copilot
-**当前版本**: M5 完成（213 测试，CLI 可用）
+**当前版本**: M8 完成（311 测试，17 项差距全部补齐）
 
 ## 评估方法
 
@@ -253,37 +254,53 @@
 
 ## 汇总
 
-| # | 缺口 | 优先级 | 涉及新模块 | 预估测试增量 |
-|---|------|--------|-----------|-------------|
-| 1 | 测试自动修复闭环 | P0 | `coding/testing.py` | +15 |
-| 2 | 并行工具调用 | P0 | `agent.py` 改 | +8 |
-| 3 | 上下文自动注入 | P0 | `.hermes/rules.md` 解析 | +10 |
-| 4 | Agent 错误恢复 | P0 | `agent.py` 改 | +12 |
-| 5 | 真实 LSP 集成 | P0 | `lsp.py` 增强 | +8 |
-| 6 | Web 搜索获取 | P1 | `coding/web.py` | +10 |
-| 7 | 代码审查 Agent | P1 | `subagents.py` 增强 | +10 |
-| 8 | 计划模式 | P1 | `cli.py` 增强 | +8 |
-| 9 | 任务追踪 | P1 | todo 工具化 | +8 |
-| 10 | 文件编辑预览 | P1 | patches 统一入口 | +6 |
-| 11 | Token 用量追踪 | P2 | `agent.py` + `/usage` | +4 |
-| 12 | 通知系统 | P2 | `coding/notify.py` | +3 |
-| 13 | 事件 Hook 系统 | P2 | `extensibility.py` 增强 | +6 |
-| 14 | Notebook 编辑 | P2 | `coding/notebook.py` | +8 |
-| 15 | 多模态输入 | P2 | `coding/multimodal.py` | +4 |
-| 16 | 状态持久化 | P2 | CLI startup | +5 |
-| 17 | 交互式权限改进 | P2 | `permissions.py` 增强 | +6 |
+| # | 缺口 | 优先级 | 模块 | 实际测试 | 状态 |
+|---|------|--------|------|---------|------|
+| 1 | 测试自动修复闭环 | P0 | `coding/testing.py` | +13 | done |
+| 2 | 并行工具调用 | P0 | `agent.py` registry | +9 | done |
+| 3 | 上下文自动注入 | P0 | `coding/context_inject.py` | +10 | done |
+| 4 | Agent 错误恢复 | P0 | `agent.py` | +9 | done |
+| 5 | 真实 LSP 集成 | P0 | `lsp.py` | +5 | done |
+| 6 | Web 搜索获取 | P1 | `coding/web.py` | +15 | done |
+| 7 | 代码审查 Agent | P1 | `subagents.py` | +9 | done |
+| 8 | 计划模式 | P1 | `subagents.py` + CLI | +2 | done |
+| 9 | 任务追踪 | P1 | `coding/todo.py` | +8 | done |
+| 10 | 文件编辑预览 | P1 | `tools/coding.py` | — | done |
+| 11 | Token 用量追踪 | P2 | `agent.py` + `/usage` | — | done |
+| 12 | 通知系统 | P2 | `coding/notify.py` | +4 | done |
+| 13 | 事件 Hook 系统 | P2 | `extensibility.py` | +4 | done |
+| 14 | Notebook 编辑 | P2 | `coding/notebook.py` | +8 | done |
+| 15 | 多模态输入 | P2 | `coding/multimodal.py` | +6 | done |
+| 16 | 状态持久化 | P2 | CLI startup | — | done |
+| 17 | 交互式权限改进 | P2 | `permissions.py` | +5 | done |
 
-**总预计**: P0 约 53 个测试增量，P1 约 42，P2 约 36，合计 130+ 测试增量。
+**实际完成**: P0 +37, P1 +34, P2 +27, 合计 311 测试（+98 增量）。
 
-## 建议推进顺序
+## 实施方案
 
 ```
-M6 (本轮): P0 全部 —
-  测试闭环 → 并行调用 → 上下文注入 → 错误恢复 → LSP 集成
-
-M7: P1 全部 —
-  Web 搜索 → 代码审查 → 计划模式 → Todo → 编辑预览
-
-M8: P2 按需 —
-  Token 追踪 → 通知 → Hooks → Notebook → 多模态 → 持久化
+M5: 文档规范化 — docs/ 体系建立
+M6: P0#1-#4 — 测试闭环 → 并行调用 → 上下文注入 → 错误恢复
+M6: P0#5 LSP 强化 — lsp_setup_guide, lsp_startup_check, CLI 接入
+M7: P1#6-#10 — Web 搜索 → 代码审查 → 计划模式 → Todo → 编辑预览
+M8: P2#11-#17 — Token → 通知 → Hooks → Notebook → 多模态 → 持久化 → 权限
 ```
+
+## 新增能力清单
+
+### 工具 (19 个新增)
+`discover_tests`, `run_tests`, `read_rules`, `workspace_context`,
+`web_search`, `web_fetch`, `code_review`,
+`todo_create`, `todo_update`, `todo_list`, `edit_file`,
+`plan_create`, `plan_approve`, `plan_list`,
+`notebook_read_cell`, `notebook_read_all_cells`, `notebook_edit_cell`,
+`notebook_insert_cell`, `notebook_delete_cell`,
+`read_image`, `run_hooks`
+
+### CLI 命令 (5 个新增)
+`/test`, `/context`, `/rules`, `/plan-approve`, `/usage`, `/notify`
+
+### 模块 (8 个新增)
+`coding/testing.py`, `coding/context_inject.py`, `coding/web.py`,
+`coding/todo.py`, `coding/notebook.py`, `coding/multimodal.py`,
+`coding/notify.py`

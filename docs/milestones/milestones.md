@@ -72,3 +72,73 @@
 - docs/ 文档体系建立（specs/iterations/verification/milestones）
 
 **当前状态**: 213 个测试全绿，CLI 可用
+
+---
+
+## M6: P0 竞品差距补齐
+
+**能力边界**: 测试修复闭环 + 并行工具调用 + 上下文注入 + 错误恢复 + LSP 强化
+
+**新增/增强模块**:
+- `coding/testing.py` — .venv 发现 + pytest 解析 + 失败定位
+- `coding/context_inject.py` — .hermes/rules.md 发现 + workspace 快照
+- `agent.py` — parallel_safe 标记 + 错误分类 + 并行提示构建
+- `coding/lsp.py` — lsp_setup_guide + lsp_startup_check + /lsp 增强
+
+**CLI 命令**: `/test`, `/context`, `/rules`
+
+**测试**: 250 (+37)
+
+---
+
+## M7: P1 竞品差距补齐
+
+**能力边界**: Web 搜索 + 代码审查 + 计划持久化 + 任务追踪 + 编辑预览
+
+**新增模块**:
+- `coding/web.py` — DuckDuckGo Lite 搜索 + URL 抓取
+- `coding/todo.py` — JSONL 持久化任务追踪
+
+**增强模块**:
+- `coding/subagents.py` — ReviewChecklist + run_code_review + plan persist/approve
+- `tools/coding.py` — edit_file 统一编辑入口
+
+**CLI 命令**: `/plan-approve`, `/todo` 增强
+
+**测试**: 284 (+34)
+
+---
+
+## M8: P2 竞品差距补齐
+
+**能力边界**: Token 追踪 + 桌面通知 + Hook 执行 + Notebook + 多模态 + 状态持久化 + 权限增强
+
+**新增模块**:
+- `coding/notify.py` — osascript/notify-send 桌面通知
+- `coding/notebook.py` — .ipynb 单元格 CRUD (5 tools)
+- `coding/multimodal.py` — 图片/PDF base64 data-URI + 模型能力检测
+
+**增强模块**:
+- `agent.py` — usage 属性 + token 计数追踪
+- `coding/extensibility.py` — run_hooks 执行
+- `coding/permissions.py` — ask_timeout + headless_webhook
+- `cli.py` — /usage, /notify, 启动时 todo/plan 摘要
+
+**CLI 命令**: `/usage`, `/notify`
+
+**测试**: 311 (+27). 竞品差距 17 项全部补齐.
+
+---
+
+**总览**:
+
+| 里程碑 | 测试 | 状态 |
+|--------|------|------|
+| M1: 核心 Agent | 基础 | done |
+| M2: Coding 模式 | +57 | done |
+| M3: 编辑与索引 | +36 | done |
+| M4: LSP/MCP/Worktree | +28 | done |
+| M5: 生产加固 | 213 | done |
+| M6: P0 补齐 | 250 | done |
+| M7: P1 竞争力 | 284 | done |
+| M8: P2 质量 | 311 | done |
