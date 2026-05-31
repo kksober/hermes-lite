@@ -2,7 +2,7 @@
 
 **日期**: 2026-05-31
 **对比基线**: Claude Code、OpenCode、Aider、Cursor、GitHub Copilot
-**当前版本**: M8 完成（311 测试，17 项 Phase 1 差距全部补齐，44 工具，41 源文件）
+**当前版本**: M11 完成（400 测试，17 项 Phase 2 差距全部补齐，44 工具，41 源文件）
 
 ## 评估方法
 
@@ -388,6 +388,32 @@ Phase 1（M5-M8）补齐了基础功能层面的 17 项差距，让 Hermes Lite 
 
 **Phase 2 总预计**: P0 约 46 测试，P1 约 46，P2 约 43，合计 135+ 测试增量。
 
+## 完成状态（2026-05-31）
+
+所有 17 项差距已通过 M9/M10/M11 三个里程碑全部补齐：
+
+| # | 缺口 | 优先级 | 里程碑 | 实现模块 |
+|---|------|--------|--------|---------|
+| 1 | CLI 流式输出 | P0 | M9 | `cli.py` `run_stream()` 路径 |
+| 2 | 终端 UI 着色 | P0 | M9 | `cli.py` `color_diff()` + rich 输出 |
+| 3 | 编辑确认流程 | P0 | M9 | `permissions.py` edit_confirm + edit_preview |
+| 4 | Agent 自我纠错循环 | P0 | M9 | `agent.py` classify_tool_error 修复 + 错误计数 |
+| 5 | 子代理 LLM 驱动 | P0 | M9 | `subagents.py` 独立工具集 |
+| 6 | 语义搜索 | P1 | M10 | `coding/embeddings.py` TF-IDF SemanticIndex |
+| 7 | 上下文窗口管理 | P1 | M10 | `compression.py` ContextWindow + 自动压缩 |
+| 8 | 每轮上下文刷新 | P1 | M10 | `context_inject.py` per_turn_context() |
+| 9 | 会话持久化恢复 | P1 | M10 | `coding/conversation_store.py` + `/resume` |
+| 10 | 编辑后自动工具链 | P1 | M10 | `extensibility.py` run_post_edit_hooks |
+| 11 | 编码规范引擎 | P2 | M11 | `context_inject.py` discover_conventions + scaffold |
+| 12 | Debugger 交互 | P2 | M11 | `testing.py` debug_error() |
+| 13 | 多项目管理 | P2 | M11 | `cli.py` `/cd` + `/ref` |
+| 14 | 用量成本洞察 | P2 | M11 | `agent.py` cost_estimate + usage 增强 |
+| 15 | 文件监视模式 | P2 | M11 | `coding/watch.py` watch_status + watch_files |
+| 16 | 多模态输出 | P2 | M11 | `tools/coding.py` _render_diagram() |
+| 17 | 安全审计 | P2 | M11 | `coding/subagents.py` security_audit() |
+
+**测试总数**: 311 → 400 (+89)
+
 ## 建议推进顺序
 
 ```
@@ -406,6 +432,8 @@ Phase 2 (本次):
 
 Phase 1（M5-M8）让 Hermes Lite **功能完备** — 它有了所有 coding agent 该有的工具。
 Phase 2（M9-M11）让 Hermes Lite **体验优秀** — 它用起来像一个真正的产品，而不是开发中的原型。
+
+**Phase 2 已于 2026-05-31 完成。** 所有 17 项体验深度与智能程度差距全部补齐，测试从 311 增长至 400。
 
 关键转变：
 - 从 "能用" 到 "好用"

@@ -130,6 +130,62 @@
 
 ---
 
+## M9: P0 体验阻断层
+
+**能力边界**: CLI 流式输出 + 终端 UI 着色 + 编辑确认流程 + Agent 错误纠错 + LLM 子代理
+
+**新增/增强模块**:
+- `cli.py` — `run_stream()` 路径接入 REPL + diff 着色 (`color_diff`) + 编辑确认交互
+- `coding/permissions.py` — `PermissionPolicy.edit_confirm` 模式 + `edit_preview` 字段
+- `agent.py` — `classify_tool_error` 修复（data=None）+ 错误计数 + 最大工具调用限制
+- `tools/coding.py` — `_render_edit_preview()` + `_apply_patch_with_confirm()`
+- `coding/subagents.py` — 子代理角色获得独立工具集（planner/builder/reviewer）
+
+**CLI 命令**: `/test`, `/context`, `/rules`
+
+**测试**: 339 (+28)
+
+---
+
+## M10: P1 竞争力差异层
+
+**能力边界**: 语义搜索 + 上下文窗口管理 + 每轮刷新 + 会话持久化 + 编辑后自动工具链
+
+**新增模块**:
+- `coding/embeddings.py` — TF-IDF 语义代码搜索（`SemanticIndex` 类 + `semantic_search` 工具）
+- `coding/conversation_store.py` — JSON 会话持久化（save/load/list/delete）
+
+**增强模块**:
+- `compression.py` — `ContextWindow` 类（自动压缩 80% 阈值 + `compress_if_needed`）
+- `agent.py` — `ContextWindow` 集成 + `clear_context()` + `/resume` 消息恢复
+- `context_inject.py` — `per_turn_context()` git/branch/file 摘要注入
+- `extensibility.py` — `run_post_edit_hooks`（auto_trigger: post_edit）
+- `cli.py` — `/clear` 命令 + `/resume` 恢复 + 每轮上下文注入 + 自动保存
+
+**测试**: 378 (+39)
+
+---
+
+## M11: P2 高级能力层
+
+**能力边界**: 编码规范引擎 + Debugger + 多项目管理 + 成本追踪 + Watch + 图表 + 安全审计
+
+**新增模块**:
+- `coding/scaffold.py` — 项目脚手架（python-app/python-lib/node-app 模板）
+- `coding/watch.py` — 文件监视（`watch_status` 快照 + `watch_files` 轮询）
+
+**增强模块**:
+- `context_inject.py` — `discover_conventions()` + `.hermes/conventions.md` 注入
+- `testing.py` — `debug_error()` traceback 源码映射（文件/行号/上下文）
+- `agent.py` — `_MODEL_PRICING` 成本表 + `cost_estimate()` + `usage` 增强
+- `cli.py` — `/cd <path>` + `/ref <path>` 多项目切换 + `/usage` 成本显示
+- `tools/coding.py` — `_render_diagram()` Mermaid 图表生成支持
+- `coding/subagents.py` — `security_audit()` pip-audit/npm audit 集成
+
+**测试**: 400 (+22). Phase 2 竞品差距 17 项全部补齐.
+
+---
+
 **总览**:
 
 | 里程碑 | 测试 | 状态 |
@@ -142,3 +198,6 @@
 | M6: P0 补齐 | 250 | done |
 | M7: P1 竞争力 | 284 | done |
 | M8: P2 质量 | 311 | done |
+| M9: P0 体验阻断 | 339 | done |
+| M10: P1 竞争力差异 | 378 | done |
+| M11: P2 高级能力 | 400 | done |
