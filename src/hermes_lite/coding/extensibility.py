@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import subprocess
 from typing import Any
 
 from hermes_lite.coding.workspace import Workspace
@@ -71,6 +73,51 @@ def load_mcp_servers(workspace: Workspace, path: str = ".hermes/mcp.json") -> di
             "enabled": bool(item.get("enabled", True)),
         })
     return {"ok": True, "config_path": path, "servers": servers}
+
+
+def run_hooks(workspace: Workspace, event: str, *, path: str = ".hermes/hooks.json") -> dict[str, object]:
+    """Execute all enabled hooks matching *event*.
+
+    Supported events: ``pre_tool``, ``post_tool``, ``pre_command``, ``post_edit``.
+    """
+    loaded = hook_status(workspace, path=path)
+    if not loaded.get("ok"):
+        return loaded
+    matching = [h for h in loaded.get("hooks", []) if h["event"] == event and h["enabled"]]
+    results = []
+    for hook in matching:
+        result = _run_single_hook(hook, workspace)
+        results.append(result)
+    return {
+        "ok": True,
+        "event": event,
+        "executed": len(results),
+        "results": results,
+    }
+
+
+def _run_single_hook(hook: dict[str, Any], workspace: Workspace) -> dict[str, object]:
+    """Execute a single hook command."""
+    cmd_str = str(hook.get("command", ""))
+    if not cmd_str:
+        return {"ok": False, "error": "empty_command", "hook_event": hook.get("event")}
+    try:
+        proc = subprocess.run(
+            cmd_str, shell=True, cwd=str(workspace.root),
+            capture_output=True, text=True, timeout=30,
+        )
+        return {
+            "ok": True,
+            "event": hook.get("event"),
+            "command": cmd_str,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout[:2000],
+            "stderr": proc.stderr[:1000],
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "timeout", "hook_event": hook.get("event")}
+    except Exception as exc:
+        return {"ok": False, "error": "execution_failed", "detail": str(exc), "hook_event": hook.get("event")}
 
 
 def _load_json_config(workspace: Workspace, path: str, *, missing_key: str) -> dict[str, Any]:

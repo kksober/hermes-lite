@@ -477,12 +477,63 @@ def _get_client(root_path: str, language: str) -> LspClient | None:
     return None
 
 
+def lsp_setup_guide(available: list[LspAvailable] | None = None) -> dict[str, object]:
+    """Return setup guidance for LSP servers.
+
+    When *available* is None the function calls `discover_lsp_servers()`.
+    """
+    if available is None:
+        available = discover_lsp_servers()
+
+    installed_names = {s.name for s in available}
+    installed_langs: set[str] = set()
+    for s in available:
+        installed_langs.update(s.languages)
+
+    python_available = "python" in installed_langs
+    ts_available = bool({"typescript", "javascript", "tsx", "jsx"} & installed_langs)
+
+    suggestions: list[str] = []
+    if not python_available:
+        suggestions.append("pip install pyright")
+        suggestions.append("pip install python-lsp-server")
+    if not ts_available:
+        suggestions.append("npm install -g typescript-language-server typescript")
+
+    return {
+        "python_available": python_available,
+        "typescript_available": ts_available,
+        "suggestions": suggestions,
+        "available": [
+            {"name": s.name, "languages": s.languages, "executable": s.executable}
+            for s in available
+        ],
+    }
+
+
+def lsp_startup_check(workspace_root: str) -> dict[str, object]:
+    """Run on agent start — surface LSP readiness and setup tips."""
+    servers = discover_lsp_servers()
+    guide = lsp_setup_guide(servers)
+    return {
+        "ok": True,
+        "servers": [
+            {"name": s.name, "languages": s.languages, "executable": s.executable}
+            for s in servers
+        ],
+        "setup_guide": guide,
+    }
+
+
 def _unavailable(operation: str) -> dict[str, object]:
     return {
         "ok": True,
         "available": False,
         "operation": operation,
-        "message": "No LSP server found. Install pyright, pylsp, or typescript-language-server.",
+        "message": (
+            "No LSP server found. Install one with: "
+            "pip install pyright  or  npm install -g typescript-language-server"
+        ),
     }
 
 

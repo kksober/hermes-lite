@@ -58,6 +58,30 @@ def test_subagent_plan_includes_clean_room_roles() -> None:
     assert "fix tests" in plan.to_dict()["task"]
 
 
+def test_create_and_persist_plan(tmp_path) -> None:
+    from hermes_lite.coding.subagents import create_subagent_plan, save_plan, load_plan, list_plans
+
+    plan = create_subagent_plan("add login")
+    result = save_plan(plan, str(tmp_path))
+    assert result["ok"] is True
+    plan_id = result["plan_id"]
+
+    loaded = load_plan(plan_id, str(tmp_path))
+    assert loaded["ok"] is True
+    assert loaded["plan"]["task"] == "add login"
+
+    listed = list_plans(str(tmp_path))
+    assert listed["total"] == 1
+
+
+def test_load_plan_missing(tmp_path) -> None:
+    from hermes_lite.coding.subagents import load_plan
+
+    result = load_plan("nonexistent", str(tmp_path))
+    assert result["ok"] is False
+    assert result["error"] == "plan_not_found"
+
+
 def test_worktree_status_reports_plain_checkout(tmp_path) -> None:
     from hermes_lite.coding.git import GitClient
     from hermes_lite.coding.workspace import Workspace

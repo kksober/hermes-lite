@@ -162,6 +162,10 @@ class HermesAgent:
         self._memory_inject_limit = memory_inject_limit
         self._defer_model_check = defer_model_check
         self._last_messages: list[ModelMessage] = []
+        # Token usage tracking
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._call_count = 0
 
     @property
     def config(self) -> ProviderConfig:
@@ -192,6 +196,16 @@ class HermesAgent:
         conversation continuity across invocations.
         """
         return self._last_messages
+
+    @property
+    def usage(self) -> dict[str, object]:
+        """Return cumulative token usage for this session."""
+        return {
+            "prompt_tokens": self._total_prompt_tokens,
+            "completion_tokens": self._total_completion_tokens,
+            "total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
+            "call_count": self._call_count,
+        }
 
     def _log_tool_failures(self, response_parts: list) -> int:
         """Log tool failures and return the count of failed tools."""
@@ -236,6 +250,20 @@ class HermesAgent:
                     ),
                     timeout=120,
                 )
+                # Track token usage
+                self._call_count += 1
+                try:
+                    usage_info = getattr(result, "usage", None)
+                    if usage_info:
+                        self._total_prompt_tokens += getattr(usage_info, "request_tokens", 0) or 0
+                        self._total_completion_tokens += getattr(usage_info, "response_tokens", 0) or 0
+                    else:
+                        raw = getattr(result, "_usage", None)
+                        if raw and isinstance(raw, dict):
+                            self._total_prompt_tokens += raw.get("prompt_tokens", 0)
+                            self._total_completion_tokens += raw.get("completion_tokens", 0)
+                except Exception:
+                    pass
                 return result
             except asyncio.TimeoutError:
                 last_exc = RuntimeError("LLM call timed out after 120s")

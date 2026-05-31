@@ -15,7 +15,16 @@ from hermes_lite.coding.context import (
     search_text,
 )
 from hermes_lite.coding.diagnostics import diagnose_python, extract_python_symbols
-from hermes_lite.coding.extensibility import hook_status, load_external_tools, load_mcp_servers
+from hermes_lite.coding.extensibility import hook_status, load_external_tools, load_mcp_servers, run_hooks
+from hermes_lite.coding.multimodal import read_image, read_image_supported
+from hermes_lite.coding.notebook import (
+    notebook_delete_cell,
+    notebook_edit_cell,
+    notebook_insert_cell,
+    notebook_read_all_cells,
+    notebook_read_cell,
+)
+from hermes_lite.coding.notify import notify as _notify_send
 from hermes_lite.coding.git import GitClient
 from hermes_lite.coding.lsp import (
     discover_lsp_servers,
@@ -37,12 +46,18 @@ from hermes_lite.coding.permissions import PermissionPolicy
 from hermes_lite.coding.sessions import SessionManager
 from hermes_lite.coding.shell import CommandRunner
 from hermes_lite.coding.subagents import (
+    approve_plan,
     create_subagent_plan,
     execute_subagent_plan,
+    list_plans,
+    run_code_review,
+    save_plan,
     subagent_execute_with_commands,
 )
 from hermes_lite.coding.context_inject import discover_rules, workspace_snapshot
 from hermes_lite.coding.testing import discover_tests, extract_failure_locations, run_tests
+from hermes_lite.coding.todo import todo_create, todo_list as _todo_list, todo_update
+from hermes_lite.coding.web import web_fetch, web_search
 from hermes_lite.coding.worktree_exec import WorktreeExecutor
 from hermes_lite.coding.workspace import Workspace
 from hermes_lite.tools.registry import ToolRegistry
@@ -64,6 +79,50 @@ def register_coding_tools(
     sessions = session_manager or SessionManager(workspace, policy)
     mcp = mcp_manager or McpClientManager(workspace)
     wt_exec = worktree_executor or WorktreeExecutor(workspace, policy)
+
+    def _edit_file(
+        path: str, old_text: str, new_text: str,
+        *, replace_all: bool = False, preview_only: bool = False,
+    ) -> dict[str, object]:
+        """Unified edit entry point: dry_run first, then apply or preview."""
+        # Validate path
+        check = workspace.resolve(path, operation="write")
+        decision = policy.decide_write(check)
+        if not decision.allowed:
+            result = decision.to_dict()
+            result.update({"ok": False, "error": "permission_denied", "reason": decision.reason})
+            return result
+
+        # Read current content for diff preview
+        current = workspace.read_text(path)
+        old_content = current.get("content", "") if current.get("ok") else ""
+
+        # Dry run to validate
+        dry = apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all, dry_run=True)
+        if not dry.get("ok"):
+            return dry
+
+        if preview_only:
+            # Generate preview diff
+            preview = diff_summary(workspace, path, old_content)
+            return {
+                "ok": True,
+                "applied": False,
+                "preview_only": True,
+                "matches_found": dry.get("matches", 0),
+                "diff_preview": preview.get("diff_preview", ""),
+                "added_lines": preview.get("added_lines", 0),
+                "removed_lines": preview.get("removed_lines", 0),
+            }
+
+        # Apply the change
+        result = apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all)
+        # Get diff for the applied change
+        new_content = workspace.read_text(path).get("content", "")
+        preview = diff_summary(workspace, path, old_content) if old_content else {"diff_preview": ""}
+        result["diff_preview"] = preview.get("diff_preview", "")
+        result["preview_only"] = False
+        return result
 
     def as_json(func: Callable[..., dict[str, object]]) -> Callable[..., str]:
         def wrapper(**kwargs: Any) -> str:
@@ -722,4 +781,288 @@ def register_coding_tools(
         handler=as_json(lambda: workspace_snapshot(workspace.root)),
         toolset="coding",
         parallel_safe=True,
+    )
+
+    # -- web tools ---------------------------------------------------------
+
+    registry.register(
+        name="web_search",
+        schema={
+            "description": "Search the web via DuckDuckGo. No API key required.",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+                "limit": {"type": "integer", "description": "Maximum results (default 10)."},
+            },
+            "required": ["query"],
+        },
+        handler=as_json(lambda query, limit=10: web_search(query, limit=limit)),
+        toolset="coding",
+    )
+    registry.register(
+        name="web_fetch",
+        schema={
+            "description": "Fetch a URL and return its text content (HTML tags stripped).",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch."},
+                "max_chars": {"type": "integer", "description": "Truncate output (default 8000)."},
+            },
+            "required": ["url"],
+        },
+        handler=as_json(lambda url, max_chars=8000: web_fetch(url, max_chars=max_chars)),
+        toolset="coding",
+    )
+
+    # -- code review tools --------------------------------------------------
+
+    registry.register(
+        name="code_review",
+        schema={
+            "description": "Run automated code review on a diff — checks security, correctness, and style.",
+            "properties": {
+                "diff_text": {"type": "string", "description": "Unified diff text (git diff output)."},
+            },
+            "required": ["diff_text"],
+        },
+        handler=as_json(lambda diff_text: run_code_review(diff_text, workspace)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
+    # -- todo tracking tools ------------------------------------------------
+
+    registry.register(
+        name="todo_create",
+        schema={
+            "description": "Create a new todo item in the workspace.",
+            "properties": {
+                "subject": {"type": "string", "description": "Short task title."},
+                "description": {"type": "string", "description": "Optional details."},
+                "priority": {"type": "string", "description": "low/medium/high (default medium)."},
+            },
+            "required": ["subject"],
+        },
+        handler=as_json(
+            lambda subject, description="", priority="medium": todo_create(
+                str(workspace.root), subject, description, priority=priority,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="todo_update",
+        schema={
+            "description": "Update or resolve a todo item by ID.",
+            "properties": {
+                "todo_id": {"type": "string", "description": "Todo item ID."},
+                "status": {"type": "string", "description": "New status: pending/in_progress/completed/blocked."},
+                "subject": {"type": "string", "description": "Updated subject."},
+                "description": {"type": "string", "description": "Updated description."},
+                "priority": {"type": "string", "description": "Updated priority."},
+            },
+            "required": ["todo_id"],
+        },
+        handler=as_json(
+            lambda todo_id, status="", subject="", description="", priority="": todo_update(
+                str(workspace.root), todo_id, status=status, subject=subject,
+                description=description, priority=priority,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="todo_list",
+        schema={
+            "description": "List workspace todo items, optionally filtered.",
+            "properties": {
+                "status": {"type": "string", "description": "Filter by status."},
+                "priority": {"type": "string", "description": "Filter by priority."},
+            },
+            "required": [],
+        },
+        handler=as_json(
+            lambda status="", priority="": _todo_list(
+                str(workspace.root), status=status, priority=priority,
+            )
+        ),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
+    # -- edit preview tool -------------------------------------------------
+
+    registry.register(
+        name="edit_file",
+        schema={
+            "description": "Validate a text patch (dry_run) and apply it when safe. Returns diff preview.",
+            "properties": {
+                "path": {"type": "string", "description": "File to edit."},
+                "old_text": {"type": "string", "description": "Exact text to replace."},
+                "new_text": {"type": "string", "description": "Replacement text."},
+                "replace_all": {"type": "boolean", "description": "Replace all occurrences (default false)."},
+                "preview_only": {"type": "boolean", "description": "Only show preview without applying (default false)."},
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
+        handler=as_json(
+            lambda path, old_text, new_text, replace_all=False, preview_only=False: _edit_file(
+                workspace, path, old_text, new_text, replace_all=replace_all, preview_only=preview_only,
+            )
+        ),
+        toolset="coding",
+    )
+
+    # -- plan management tools ---------------------------------------------
+
+    registry.register(
+        name="plan_create",
+        schema={
+            "description": "Create a coding plan (persisted to .hermes/plans/).",
+            "properties": {
+                "task": {"type": "string", "description": "Task description."},
+            },
+            "required": ["task"],
+        },
+        handler=as_json(
+            lambda task: save_plan(
+                create_subagent_plan(task), str(workspace.root),
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="plan_approve",
+        schema={
+            "description": "Approve and execute a persisted plan in an isolated worktree.",
+            "properties": {
+                "plan_id": {"type": "string", "description": "Plan ID to approve and execute."},
+            },
+            "required": ["plan_id"],
+        },
+        handler=as_json(
+            lambda plan_id: approve_plan(plan_id, workspace, policy)
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="plan_list",
+        schema={
+            "description": "List all persisted plans.",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: list_plans(str(workspace.root))),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
+    # -- notebook tools ----------------------------------------------------
+
+    registry.register(
+        name="notebook_read_cell",
+        schema={
+            "description": "Read a single cell from a .ipynb notebook by index (0-based).",
+            "properties": {
+                "path": {"type": "string", "description": "Notebook file path."},
+                "cell_index": {"type": "integer", "description": "Cell index."},
+            },
+            "required": ["path", "cell_index"],
+        },
+        handler=as_json(lambda path, cell_index: notebook_read_cell(path, cell_index)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+    registry.register(
+        name="notebook_read_all_cells",
+        schema={
+            "description": "Read all cells from a .ipynb notebook.",
+            "properties": {
+                "path": {"type": "string", "description": "Notebook file path."},
+            },
+            "required": ["path"],
+        },
+        handler=as_json(lambda path: notebook_read_all_cells(path)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+    registry.register(
+        name="notebook_edit_cell",
+        schema={
+            "description": "Replace the source of a notebook cell.",
+            "properties": {
+                "path": {"type": "string"},
+                "cell_index": {"type": "integer"},
+                "source": {"type": "string"},
+                "cell_type": {"type": "string", "description": "code or markdown."},
+            },
+            "required": ["path", "cell_index", "source"],
+        },
+        handler=as_json(
+            lambda path, cell_index, source, cell_type="code": notebook_edit_cell(
+                path, cell_index, source, cell_type=cell_type,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="notebook_insert_cell",
+        schema={
+            "description": "Insert a new cell into a notebook at the given index.",
+            "properties": {
+                "path": {"type": "string"},
+                "cell_index": {"type": "integer"},
+                "source": {"type": "string"},
+                "cell_type": {"type": "string"},
+            },
+            "required": ["path", "cell_index", "source"],
+        },
+        handler=as_json(
+            lambda path, cell_index, source, cell_type="code": notebook_insert_cell(
+                path, cell_index, source, cell_type=cell_type,
+            )
+        ),
+        toolset="coding",
+    )
+    registry.register(
+        name="notebook_delete_cell",
+        schema={
+            "description": "Delete a cell from a notebook by index.",
+            "properties": {
+                "path": {"type": "string"},
+                "cell_index": {"type": "integer"},
+            },
+            "required": ["path", "cell_index"],
+        },
+        handler=as_json(lambda path, cell_index: notebook_delete_cell(path, cell_index)),
+        toolset="coding",
+    )
+
+    # -- multimodal tools --------------------------------------------------
+
+    registry.register(
+        name="read_image",
+        schema={
+            "description": "Read an image/PDF file and return a base64 data-URI for vision models.",
+            "properties": {
+                "path": {"type": "string", "description": "Image or PDF file path."},
+            },
+            "required": ["path"],
+        },
+        handler=as_json(lambda path: read_image(path)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
+    # -- hook execution tools ----------------------------------------------
+
+    registry.register(
+        name="run_hooks",
+        schema={
+            "description": "Execute enabled hooks for an event (pre_tool, post_tool, pre_command, post_edit).",
+            "properties": {
+                "event": {"type": "string", "description": "Hook event name."},
+            },
+            "required": ["event"],
+        },
+        handler=as_json(lambda event: run_hooks(workspace, event)),
+        toolset="coding",
     )

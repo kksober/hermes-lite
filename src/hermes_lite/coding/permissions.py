@@ -108,12 +108,17 @@ class PermissionPolicy:
         interactive: bool = False,
         confirm: ConfirmCallback | None = None,
         audit: AuditLogger | None = None,
+        *,
+        ask_timeout: float = 60.0,
+        headless_webhook: str = "",
     ) -> None:
         self.mode = mode
         self.interactive = interactive
         self.confirm = confirm
         self.audit = audit or AuditLogger()
         self._authorizations: list[SessionAuthorization] = []
+        self.ask_timeout = ask_timeout
+        self.headless_webhook = headless_webhook
 
     # ------------------------------------------------------------------
     # session authorizations
@@ -311,6 +316,8 @@ class PermissionPolicy:
         return {
             "mode": self.mode,
             "interactive": self.interactive,
+            "ask_timeout": self.ask_timeout,
+            "headless": bool(self.headless_webhook),
             "reads": "allow workspace reads except protected paths",
             "writes": "allow workspace writes except protected paths",
             "commands": self._command_summary_desc(),

@@ -243,9 +243,12 @@ async def _handle_dot_command(
                 print("  /lsp             Show LSP server availability")
                 print("  /mcp             Show MCP server connection status")
                 print("  /worktree        Show git worktree info")
-                print("  /plan <task>     Generate a subagent plan")
+                print("  /plan [task]     Create or list persisted plans")
+                print("  /plan-approve [id]  Approve and execute a plan in worktree")
                 print("  /context         Show workspace context (branch, rules, changes)")
-                print("  /todo [text]     Add a todo item")
+                print("  /todo [text]     List or create todo items")
+                print("  /usage           Show token usage for this session")
+                print("  /notify [msg]    Send a desktop notification")
                 print("  /run             Resume agent execution stub")
                 print("  /resume <id>     Resume a command session")
             print("  Any other text is sent to the agent.")
@@ -383,15 +386,82 @@ async def _handle_dot_command(
                 return True
             task = args.strip()
             if not task:
-                print("Usage: /plan <task description>")
+                from hermes_lite.coding.subagents import list_plans
+                result = list_plans(str(workspace_runtime.workspace.root))
+                plans = result.get("plans", [])
+                if plans:
+                    for p in plans:
+                        print(f"  [{p.get('plan_id')}] {p.get('task')} ({p.get('status', 'draft')})")
+                else:
+                    print("  No saved plans. Use /plan <task> to create one.")
                 return True
-            from hermes_lite.coding.subagents import create_subagent_plan
+            from hermes_lite.coding.subagents import create_subagent_plan, save_plan
             plan = create_subagent_plan(task)
+            saved = save_plan(plan, str(workspace_runtime.workspace.root))
+            print(f"Plan created: {saved['plan_id']}")
             print(json.dumps(plan.to_dict(), indent=2))
             return True
 
+        case "plan-approve":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            plan_id = args.strip()
+            if not plan_id:
+                from hermes_lite.coding.subagents import list_plans
+                result = list_plans(str(workspace_runtime.workspace.root))
+                plans = result.get("plans", [])
+                if plans:
+                    plan_id = plans[-1].get("plan_id", "")
+                    print(f"Approving latest plan: {plan_id}")
+                else:
+                    print("No plans to approve. Use /plan <task> first.")
+                    return True
+            from hermes_lite.coding.subagents import approve_plan
+            result = approve_plan(plan_id, workspace_runtime.workspace, workspace_runtime.permission_policy)
+            if result.get("ok"):
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                print(f"Plan approval failed: {result.get('error')}")
+            return True
+
         case "todo":
-            print("(todo tracking not yet implemented)")
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            arg = args.strip()
+            if arg:
+                # /todo <subject> — create a new todo
+                from hermes_lite.coding.todo import todo_create
+                result = todo_create(str(workspace_runtime.workspace.root), arg)
+                if result.get("ok"):
+                    print(f"  [{result['todo']['id']}] {arg}")
+                else:
+                    print(f"  Error: {result.get('error')}")
+            else:
+                from hermes_lite.coding.todo import todo_list
+                result = todo_list(str(workspace_runtime.workspace.root))
+                todos = result.get("todos", [])
+                if todos:
+                    for t in todos:
+                        status_mark = {"pending": " ", "in_progress": ">", "completed": "x", "blocked": "!"}.get(t["status"], " ")
+                        print(f"  [{status_mark}] {t['id']} {t['subject']}")
+                else:
+                    print("  No todos. Use /todo <subject> to create one.")
+            return True
+
+        case "usage":
+            print(f"  Prompt tokens:     {agent._total_prompt_tokens:,}")
+            print(f"  Completion tokens: {agent._total_completion_tokens:,}")
+            total = agent._total_prompt_tokens + agent._total_completion_tokens
+            print(f"  Total tokens:      {total:,}")
+            print(f"  LLM calls:         {agent._call_count}")
+            return True
+
+        case "notify":
+            from hermes_lite.coding.notify import notify
+            result = notify("Hermes Lite", args.strip() or "Task complete.")
+            print(f"  {'Sent' if result.get('ok') else 'Failed'}: {result.get('detail', result.get('error', ''))}")
             return True
 
         case "run":
@@ -407,14 +477,20 @@ async def _handle_dot_command(
             return True
 
         case "lsp":
-            from hermes_lite.coding.lsp import discover_lsp_servers, lsp_status
-            st = lsp_status()
-            if st.get("available_servers"):
-                for s in st["available_servers"]:
+            from hermes_lite.coding.lsp import lsp_startup_check
+
+            ws_root = workspace_runtime.workspace.root if workspace_runtime else str(Path.cwd())
+            st = lsp_startup_check(ws_root)
+            if st.get("servers"):
+                for s in st["servers"]:
                     print(f"  {s['name']} ({', '.join(s['languages'])}) — {s['executable']}")
             else:
-                print("  No LSP servers found. Install pyright/pylsp/typescript-language-server.")
-            print(f"  Active sessions: {st['active_sessions']}")
+                print("  No LSP servers found.")
+            guide = st.get("setup_guide", {})
+            if guide.get("suggestions"):
+                print("  Setup:")
+                for hint in guide["suggestions"]:
+                    print(f"    {hint}")
             return True
 
         case "mcp":
@@ -704,7 +780,38 @@ def main() -> None:
         skill_manager=skills,
     )
 
-    # 5. Run the REPL
+    # 5. LSP readiness hint
+    if workspace_runtime is not None:
+        from hermes_lite.coding.lsp import discover_lsp_servers
+        servers = discover_lsp_servers()
+        if servers:
+            names = ", ".join(s.name for s in servers)
+            print(f"[lsp] {names} ready")
+        else:
+            print("[lsp] no servers found — pip install pyright")
+
+    # 6. Persistent state summary
+    if workspace_runtime is not None:
+        from hermes_lite.coding.todo import todo_list
+        from hermes_lite.coding.subagents import list_plans
+        todos = todo_list(str(workspace_runtime.workspace.root))
+        todo_count = todos.get("total", 0)
+        if todo_count:
+            pending = todos.get("counts", {}).get("pending", 0)
+            in_prog = todos.get("counts", {}).get("in_progress", 0)
+            parts = []
+            if pending:
+                parts.append(f"{pending} pending")
+            if in_prog:
+                parts.append(f"{in_prog} in progress")
+            print(f"[todo] {todo_count} items ({', '.join(parts)})")
+        plans = list_plans(str(workspace_runtime.workspace.root))
+        plan_count = plans.get("total", 0)
+        if plan_count:
+            draft = sum(1 for p in plans.get("plans", []) if p.get("status") == "draft")
+            print(f"[plan] {plan_count} saved ({draft} draft)")
+
+    # 7. Run the REPL
     try:
         asyncio.run(run_repl(agent, memory, skills, workspace_runtime=workspace_runtime))
     except KeyboardInterrupt:

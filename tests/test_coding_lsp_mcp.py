@@ -201,5 +201,14 @@ def test_new_tools_registered(tmp_path) -> None:
         "subagent_execute",
         "discover_tests", "run_tests",
         "read_rules", "workspace_context",
+        "web_search", "web_fetch",
+        "code_review",
+        "todo_create", "todo_update", "todo_list",
+        "edit_file",
+        "plan_create", "plan_approve", "plan_list",
+        "notebook_read_cell", "notebook_read_all_cells",
+        "notebook_edit_cell", "notebook_insert_cell", "notebook_delete_cell",
+        "read_image",
+        "run_hooks",
     }
     assert expected_new <= names

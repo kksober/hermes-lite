@@ -9,9 +9,13 @@ Supports:
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+import re
+from pathlib import Path
 
 from hermes_lite.coding.permissions import PermissionPolicy
 from hermes_lite.coding.worktree_exec import WorktreeExecutor, WorktreeRun, WorktreeTask
@@ -243,6 +247,164 @@ def subagent_execute_with_commands(
 
 
 # ---------------------------------------------------------------------------
+# code review
+# ---------------------------------------------------------------------------
+
+# Security patterns that trigger findings
+_SECURITY_PATTERNS: list[tuple[str, str, str]] = [
+    (r"os\.system\(", "os.system", "Prefer subprocess.run over os.system — avoids shell injection."),
+    (r"subprocess\.\w+\([^)]*shell\s*=\s*True", "shell=True", "shell=True is a shell injection risk when user input reaches the command."),
+    (r"exec\(", "exec()", "exec() on untrusted input is arbitrary code execution."),
+    (r"eval\(", "eval()", "eval() on untrusted input is a code injection risk."),
+    (r"\.execute\s*\(\s*f['\"]", "SQL execute", "Use parameterised queries — f-strings in SQL are injection-prone."),
+    (r"hashlib\.md5\(|hashlib\.sha1\(", "weak hash", "md5/sha1 are cryptographically broken. Use sha256 or better."),
+    (r"password\s*=\s*['\"]\w", "hardcoded secret", "Hard-coded credential detected. Use environment variables or a vault."),
+    (r"api_key\s*=\s*['\"]\w", "hardcoded key", "API key in source. Use environment variables."),
+]
+
+_CORRECTNESS_PATTERNS: list[tuple[str, str, str]] = [
+    (r"except\s*:\s*$", "bare except", "Bare 'except:' catches KeyboardInterrupt and SystemExit. Be specific."),
+    (r"except\s+Exception\s*:\s*pass\s*$", "silenced exception", "Silenced exception hides errors. At minimum log the error."),
+    (r"time\.sleep\(", "time.sleep", "time.sleep in production code may indicate a missing proper wait/retry mechanism."),
+]
+
+_STYLE_PATTERNS: list[tuple[str, str, str]] = [
+    (r"def \w+\(\):\s*\n\s+pass", "empty function", "Empty function body. Either implement or add a TODO."),
+]
+
+
+@dataclass(frozen=True)
+class ReviewChecklist:
+    """Structured review checklist categories."""
+
+    security: list[str] = field(default_factory=lambda: [
+        "No command injection (shell=True, os.system, eval, exec)",
+        "No SQL injection (parameterised queries used)",
+        "No hard-coded secrets or API keys",
+        "No weak cryptographic primitives (md5, sha1)",
+    ])
+    correctness: list[str] = field(default_factory=lambda: [
+        "No bare except clauses",
+        "No silently swallowed exceptions",
+        "Edge cases handled (empty input, None, large values)",
+        "No race conditions in shared state",
+    ])
+    style: list[str] = field(default_factory=lambda: [
+        "Consistent naming with project conventions",
+        "Functions / methods are a manageable size (< 60 lines)",
+        "No commented-out code left behind",
+    ])
+    tests: list[str] = field(default_factory=lambda: [
+        "Happy-path test exists",
+        "Error-path test exists",
+        "Edge case covered (empty, max, boundary)",
+    ])
+
+    def to_dict(self) -> dict[str, list[str]]:
+        return {
+            "security": self.security,
+            "correctness": self.correctness,
+            "style": self.style,
+            "tests": self.tests,
+        }
+
+
+def run_code_review(
+    diff_text: str, workspace: Workspace
+) -> dict[str, object]:
+    """Run an automated code review on a diff.
+
+    Scans the diff for security, correctness, and style issues using
+    structural patterns.  Returns structured findings with severity and
+    suggestions.
+    """
+    if not diff_text.strip():
+        return {
+            "ok": True,
+            "findings": [],
+            "summary": "No diff to review.",
+            "checklist": ReviewChecklist().to_dict(),
+        }
+
+    findings: list[dict[str, object]] = []
+    added_lines = _extract_added_lines(diff_text)
+
+    for pattern, title, suggestion in _SECURITY_PATTERNS:
+        for lineno, line in added_lines:
+            if re.search(pattern, line):
+                findings.append({
+                    "severity": "high",
+                    "category": "security",
+                    "title": title,
+                    "line": lineno,
+                    "code": line.strip(),
+                    "suggestion": suggestion,
+                })
+
+    for pattern, title, suggestion in _CORRECTNESS_PATTERNS:
+        for lineno, line in added_lines:
+            if re.search(pattern, line):
+                findings.append({
+                    "severity": "medium",
+                    "category": "correctness",
+                    "title": title,
+                    "line": lineno,
+                    "code": line.strip(),
+                    "suggestion": suggestion,
+                })
+
+    for pattern, title, suggestion in _STYLE_PATTERNS:
+        for lineno, line in added_lines:
+            if re.search(pattern, line):
+                findings.append({
+                    "severity": "low",
+                    "category": "style",
+                    "title": title,
+                    "line": lineno,
+                    "code": line.strip(),
+                    "suggestion": suggestion,
+                })
+
+    # Deduplicate by title+line
+    seen: set[tuple[str, int]] = set()
+    unique: list[dict[str, object]] = []
+    for f in findings:
+        key = (str(f["title"]), int(f["line"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+
+    high = sum(1 for f in unique if f["severity"] == "high")
+    medium = sum(1 for f in unique if f["severity"] == "medium")
+    low = sum(1 for f in unique if f["severity"] == "low")
+
+    return {
+        "ok": True,
+        "findings": unique,
+        "counts": {"high": high, "medium": medium, "low": low, "total": len(unique)},
+        "summary": f"{len(unique)} finding(s): {high} high, {medium} medium, {low} low",
+        "checklist": ReviewChecklist().to_dict(),
+    }
+
+
+def _extract_added_lines(diff_text: str) -> list[tuple[int, str]]:
+    """Extract added lines with their new file line numbers from a unified diff."""
+    result: list[tuple[int, str]] = []
+    current_line = 0
+    for line in diff_text.splitlines():
+        if line.startswith("@@"):
+            m = re.search(r"\+(\d+)", line)
+            if m:
+                current_line = int(m.group(1))
+        elif line.startswith("+") and not line.startswith("+++"):
+            result.append((current_line, line[1:]))
+            current_line += 1
+        elif not line.startswith("-") and not line.startswith("---"):
+            current_line += 1
+    return result
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
@@ -265,3 +427,96 @@ def _reconstruct_run(raw_run: dict[str, object], executor: WorktreeExecutor) -> 
                 status=str(task_data.get("status", "pending")),
             ))
     return run
+
+
+# ---------------------------------------------------------------------------
+# plan persistence
+# ---------------------------------------------------------------------------
+
+
+def _plans_dir(workspace_root: str) -> Path:
+    d = Path(workspace_root) / ".hermes" / "plans"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def save_plan(plan: SubagentPlan | dict[str, object], workspace_root: str) -> dict[str, object]:
+    """Persist a plan to ``.hermes/plans/<plan_id>.json``."""
+    if isinstance(plan, SubagentPlan):
+        data = plan.to_dict()
+    else:
+        data = dict(plan)
+    plan_id = str(data.get("plan_id", uuid.uuid4().hex[:12]))
+    data.setdefault("plan_id", plan_id)
+    data.setdefault("status", "draft")
+
+    path = _plans_dir(workspace_root) / f"{plan_id}.json"
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True, "plan_id": plan_id, "path": str(path)}
+
+
+def load_plan(plan_id: str, workspace_root: str) -> dict[str, object]:
+    """Load a persisted plan by ID."""
+    path = _plans_dir(workspace_root) / f"{plan_id}.json"
+    if not path.exists():
+        return {"ok": False, "error": "plan_not_found", "plan_id": plan_id}
+    try:
+        return {"ok": True, "plan": json.loads(path.read_text(encoding="utf-8"))}
+    except Exception as exc:
+        return {"ok": False, "error": "plan_read_failed", "detail": str(exc)}
+
+
+def list_plans(workspace_root: str) -> dict[str, object]:
+    """List all persisted plans."""
+    d = _plans_dir(workspace_root)
+    if not d.exists():
+        return {"ok": True, "plans": [], "total": 0}
+    plans = []
+    for f in sorted(d.glob("*.json")):
+        try:
+            plans.append(json.loads(f.read_text(encoding="utf-8")))
+        except json.JSONDecodeError:
+            pass
+    return {"ok": True, "plans": plans, "total": len(plans)}
+
+
+def approve_plan(
+    plan_id: str, workspace: Workspace, permission_policy: PermissionPolicy,
+) -> dict[str, object]:
+    """Approve and execute a persisted plan via WorktreeExecutor."""
+    loaded = load_plan(plan_id, str(workspace.root))
+    if not loaded.get("ok"):
+        return loaded
+
+    task = str(loaded.get("plan", {}).get("task", "coding task"))
+    executor = WorktreeExecutor(workspace, permission_policy)
+
+    create_result = executor.create_run(task, roles=["planner", "builder", "reviewer"])
+    if not create_result.get("ok"):
+        return create_result
+
+    raw_run = create_result["run"]
+    run = _reconstruct_run(raw_run, executor)
+
+    for i in range(3):
+        step = executor.execute_step(run, i, commands=None)
+        if not step.get("ok"):
+            return {
+                "ok": False,
+                "error": "step_execution_failed",
+                "step_index": i,
+                "step": step,
+                "plan_id": plan_id,
+            }
+
+    review = executor.review_gate(run)
+
+    # Mark plan as executed
+    save_plan({"plan_id": plan_id, "status": "executed"}, str(workspace.root))
+
+    return {
+        "ok": True,
+        "plan_id": plan_id,
+        "run": run.to_dict(),
+        "review": review.get("review", {}),
+    }
