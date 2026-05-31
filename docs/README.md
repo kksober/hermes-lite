@@ -9,5 +9,6 @@
 
 | 日期 | 审查 | 评分 | 分支 |
 |------|------|------|------|
-| 2026-05-31 | [Coding Agent 能力审查 Phase 2](reviews/2026-05-31-coding-agent-review-phase2.md) | A- | codex/coding-agent-evolution |
-| 2026-05-27 | [Coding Agent 能力审查](reviews/2026-05-27-coding-agent-review.md) | B+ | main |
+| 2026-05-31 | [Phase 3 — 终审 (M1-M14)](reviews/2026-05-31-coding-agent-review-phase3.md) | **A** | codex/coding-agent-evolution |
+| 2026-05-31 | [Phase 2 (M1-M11)](reviews/2026-05-31-coding-agent-review-phase2.md) | A- | codex/coding-agent-evolution |
+| 2026-05-27 | [Phase 1 (M1-M5)](reviews/2026-05-27-coding-agent-review.md) | B+ | main |

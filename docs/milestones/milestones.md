@@ -186,6 +186,55 @@
 
 ---
 
+## M12: 编辑精度 + Skill 闭环
+
+**能力边界**: 模糊匹配 + 技能工具注册 + 文件查找 + 大文件保护
+
+**新增/增强模块**:
+- `coding/patches.py` — `_fuzzy_find()` 双策略模糊匹配（尾随空格容忍 + 缩进容忍）
+- `coding/context.py` — `find_files()` glob 文件查找
+- `coding/skills/manager.py` — `skill_view()` + `skill_manage()` 工具注册，从只读变为可写
+- `tools/coding.py` — `find_files` + `skill_view` + `skill_manage` 工具注册；`read_file` 添加 `max_bytes=1_000_000` 保护
+- `cli.py` — `create_workspace_runtime` 支持 `skill_manager` 参数
+- `api.py` — `_skills` 创建移到 `register_coding_tools` 之前
+
+**测试**: 417 (+17). Review 指出的 4 项编辑/技能缺口全部补齐.
+
+---
+
+## M13: 代码理解深度
+
+**能力边界**: Python AST 解析 + 跨文件调用图 + 符号感知语义搜索
+
+**新增模块**:
+- `coding/ast_analysis.py` — 零依赖 Python 代码分析：`extract_symbols`（类/函数/参数/类型/装饰器/导入）、`build_call_graph`（跨文件 caller→callee 解析）、`find_references`（定义 + 引用 + callers）
+
+**增强模块**:
+- `coding/embeddings.py` — `index_files()` 支持 `symbols_per_file` 参数，TF-IDF 索引中函数/类名 2x 权重
+- `coding/diagnostics.py` — `extract_python_symbols` 委托到 `ast_analysis.extract_symbols`，返回限定名方法（如 `Thing.method`）
+- `coding/context.py` — `_enrich_symbol_counts()` 通过 `ast.walk` 扫描 Python 文件计数字段
+- `tools/coding.py` — 注册 `code_structure`、`call_graph`、`find_symbol` 工具
+
+**测试**: 430 (+13). 零新依赖.
+
+---
+
+## M14: 多文件编辑 + 知识闭环 + CLI 增强
+
+**能力边界**: 原子性多文件编辑 + 对话回滚/重试 + 上下文手动压缩 + 知识自动提炼
+
+**新增/增强模块**:
+- `coding/patches.py` — `edit_batch()` 多文件原子编辑（dry-run-all → apply-all 策略，全或无语义）
+- `tools/coding.py` — `edit_batch` 工具注册 + 权限检查 + 交互式预览
+- `agent.py` — `_turn_count` 计数器 + `_reflection_interval`（默认 5 轮）+ `_snapshot_history()` / `undo_last_turn()` 对话回滚 + `_build_reflection_prompt()` 知识提炼提示
+- `cli.py` — `/undo`（恢复消息快照）+ `/retry`（undo + 重发上次输入）+ `/compact`（手动压缩上下文）+ `_last_user_input` 追踪
+
+**CLI 命令**: `/undo`, `/retry`, `/compact`
+
+**测试**: 432 (+17). 7 轮 review 建议全部落地，多文件编辑有事务性保证.
+
+---
+
 **总览**:
 
 | 里程碑 | 测试 | 状态 |
@@ -201,3 +250,6 @@
 | M9: P0 体验阻断 | 339 | done |
 | M10: P1 竞争力差异 | 378 | done |
 | M11: P2 高级能力 | 400 | done |
+| M12: 编辑精度 + Skill 闭环 | 417 | done |
+| M13: 代码理解深度 | 430 | done |
+| M14: 多文件编辑 + 知识闭环 | 432 | done |
