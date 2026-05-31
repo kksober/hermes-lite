@@ -39,6 +39,7 @@ from hermes_lite.coding.lsp import (
 )
 from hermes_lite.coding.mcp_client import McpClientManager
 from hermes_lite.coding.patches import (
+    _fuzzy_find,
     apply_text_patch,
     apply_unified_diff,
     diff_summary,
@@ -109,6 +110,7 @@ def _render_edit_preview(
 def _apply_patch_with_confirm(
     workspace: Workspace, policy: PermissionPolicy,
     path: str, old_text: str, new_text: str, *, replace_all: bool = False,
+    fuzzy: bool = False,
 ) -> dict[str, object]:
     """Apply a text patch with edit confirmation when interactive."""
     check = workspace.resolve(path, operation="write")
@@ -120,13 +122,22 @@ def _apply_patch_with_confirm(
     if decision.requires_approval:
         current = workspace.read_text(path)
         old_content = current.get("content", "") if current.get("ok") else ""
-        dry = apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all, dry_run=True)
-        diff_text = _render_edit_preview(path, old_text, new_text, dry)
-        decision.edit_preview = f"Patch preview for {path}:\n{diff_text}"
+        # Run a dry preview — note: apply_text_patch doesn't have a real dry_run
+        # so we use a heuristic: try to find the match and render the preview
+        read_r = workspace.read_text(path)
+        if read_r.get("ok"):
+            match_key = old_text
+            file_content = str(read_r["content"])
+            if old_text not in file_content and fuzzy:
+                match_key = _fuzzy_find(file_content, old_text) or old_text
+            diff_text = _render_edit_preview(path, match_key, new_text, {"matches": 1 if match_key else 0, "content": file_content})
+        else:
+            diff_text = f"- {old_text}\n+ {new_text}"
+        decision.edit_preview = f"Edit preview for {path}:\n{diff_text}"
         if not policy.confirm(decision):
             return {"ok": False, "error": "edit_rejected",
-                    "message": f"Patch to {path} was not confirmed."}
-    return apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all)
+                    "message": f"Edit to {path} was not confirmed."}
+    return apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all, fuzzy=fuzzy)
 
 
 def _apply_unified_diff_with_confirm(
@@ -156,6 +167,7 @@ def register_coding_tools(
     session_manager: SessionManager | None = None,
     mcp_manager: McpClientManager | None = None,
     worktree_executor: WorktreeExecutor | None = None,
+    skill_manager: Any | None = None,
 ) -> None:
     """Register workspace-aware coding tools."""
     policy = permission_policy or PermissionPolicy()
@@ -302,13 +314,26 @@ def register_coding_tools(
             "git": git.worktree_status(),
         }
 
-    def read_file(path: str, offset: int = 1, limit: int = 500) -> dict[str, object]:
+    def read_file(path: str, offset: int = 1, limit: int = 500, max_bytes: int = 1_000_000) -> dict[str, object]:
         check = workspace.resolve(path, operation="read")
         decision = policy.decide_read(check)
         if not decision.allowed:
             result = decision.to_dict()
             result.update({"ok": False, "error": "permission_denied", "reason": decision.reason})
             return result
+        try:
+            size = check.path.stat().st_size
+        except OSError:
+            size = 0
+        if size > max_bytes:
+            return {
+                "ok": False,
+                "error": "file_too_large",
+                "path": str(check.relative_path),
+                "size": size,
+                "max_bytes": max_bytes,
+                "message": f"File is {size} bytes, exceeds max {max_bytes}. Use a smaller max_bytes or read with offset/limit.",
+            }
         result = workspace.read_text(path)
         if not result["ok"]:
             return result
@@ -396,11 +421,12 @@ def register_coding_tools(
     registry.register(
         name="read_file",
         schema={
-            "description": "Read a workspace file with line-number metadata.",
+            "description": "Read a workspace file with line-number metadata. Refuses files over max_bytes (default 1MB).",
             "properties": {
                 "path": {"type": "string"},
                 "offset": {"type": "integer"},
                 "limit": {"type": "integer"},
+                "max_bytes": {"type": "integer", "description": "Maximum file size in bytes to read (default 1,000,000)."},
             },
             "required": ["path"],
         },
@@ -1366,3 +1392,100 @@ def register_coding_tools(
         )),
         toolset="coding",
     )
+
+    # -- find_files (glob-based file search) -------------------------------
+
+    registry.register(
+        name="find_files",
+        schema={
+            "description": "Find workspace files matching a glob pattern (e.g. '*.py', 'src/**/*.ts').",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern to match file paths."},
+                "limit": {"type": "integer", "description": "Maximum files to return (default 100)."},
+            },
+            "required": ["pattern"],
+        },
+        handler=as_json(lambda pattern, limit=100: list_files(workspace, pattern=pattern, limit=limit)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
+    # -- apply_edit (fuzzy search-and-replace) ----------------------------
+
+    registry.register(
+        name="apply_edit",
+        schema={
+            "description": "Replace text in a file with fuzzy matching (trailing-ws and indent tolerant).",
+            "properties": {
+                "path": {"type": "string", "description": "Target file path."},
+                "old_text": {"type": "string", "description": "Text to find and replace."},
+                "new_text": {"type": "string", "description": "Replacement text."},
+                "replace_all": {"type": "boolean", "description": "Replace all occurrences (default false)."},
+                "fuzzy": {"type": "boolean", "description": "Use fuzzy matching (default true)."},
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
+        handler=as_json(
+            lambda path, old_text, new_text, replace_all=False, fuzzy=True: _apply_patch_with_confirm(
+                workspace, policy, path, old_text, new_text, replace_all=replace_all, fuzzy=fuzzy,
+            )
+        ),
+        toolset="coding",
+    )
+
+    # -- skill_view -------------------------------------------------------
+
+    if skill_manager is not None:
+        def _skill_view(name: str) -> dict[str, object]:
+            content = skill_manager.load(name)
+            if content is None:
+                return {"ok": False, "error": "skill_not_found", "name": name}
+            return {"ok": True, "name": name, "content": content}
+
+        def _skill_manage(action: str, name: str, *, content: str = "",
+                          old_string: str = "", new_string: str = "") -> dict[str, object]:
+            if action == "create":
+                try:
+                    result = skill_manager.create(name, content)
+                    return {"ok": True, "action": "create", "name": result}
+                except ValueError as exc:
+                    return {"ok": False, "error": "invalid_frontmatter", "message": str(exc)}
+            elif action == "patch":
+                ok = skill_manager.patch(name, old_string, new_string)
+                return {"ok": ok, "action": "patch", "name": name}
+            elif action == "delete":
+                ok = skill_manager.delete(name)
+                return {"ok": ok, "action": "delete", "name": name}
+            else:
+                return {"ok": False, "error": "invalid_action",
+                        "message": f"Unknown action '{action}'. Use create, patch, or delete."}
+
+        registry.register(
+            name="skill_view",
+            schema={
+                "description": "Load and read the full content of a skill by name.",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill directory name."},
+                },
+                "required": ["name"],
+            },
+            handler=as_json(_skill_view),
+            toolset="coding",
+            parallel_safe=True,
+        )
+        registry.register(
+            name="skill_manage",
+            schema={
+                "description": "Create, patch, or delete a skill. Action 'create' requires 'content' (full SKILL.md with YAML frontmatter). Action 'patch' requires 'old_string' and 'new_string'. Action 'delete' just needs 'name'.",
+                "properties": {
+                    "action": {"type": "string", "description": "One of: create, patch, delete."},
+                    "name": {"type": "string", "description": "Skill directory name."},
+                    "content": {"type": "string", "description": "Full SKILL.md text with YAML frontmatter (required for create)."},
+                    "old_string": {"type": "string", "description": "Exact text to find and replace (required for patch)."},
+                    "new_string": {"type": "string", "description": "Replacement text (required for patch)."},
+                },
+                "required": ["action", "name"],
+            },
+            handler=as_json(_skill_manage),
+            toolset="coding",
+        )

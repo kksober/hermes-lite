@@ -144,6 +144,7 @@ def create_workspace_runtime(
     permission_policy: PermissionPolicy | None = None,
     *,
     confirm: "Callable[[PermissionDecision], bool] | None" = None,
+    skill_manager: SkillManager | None = None,
 ) -> WorkspaceRuntime | None:
     """Create workspace runtime and register coding tools when configured."""
     if not workspace_path:
@@ -159,6 +160,7 @@ def create_workspace_runtime(
         session_manager=sessions,
         mcp_manager=mcp,
         worktree_executor=wt_exec,
+        skill_manager=skill_manager,
     )
     return WorkspaceRuntime(
         workspace=workspace,
@@ -877,11 +879,12 @@ def main() -> None:
             return False
         return answer in ("y", "yes")
 
-    workspace_runtime = create_workspace_runtime(
-        args.workspace, tools, confirm=_confirm_permission
-    )
-
     skills = SkillManager(base_dir="skills/")
+
+    workspace_runtime = create_workspace_runtime(
+        args.workspace, tools, confirm=_confirm_permission,
+        skill_manager=skills,
+    )
     memory = MemoryManager()
 
     # 4. Create the agent

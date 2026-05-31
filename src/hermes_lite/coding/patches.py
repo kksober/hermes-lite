@@ -24,8 +24,13 @@ def apply_text_patch(
     new_text: str,
     *,
     replace_all: bool = False,
+    fuzzy: bool = False,
 ) -> dict[str, object]:
-    """Apply an exact text replacement inside a workspace file."""
+    """Apply an exact text replacement inside a workspace file.
+
+    When *fuzzy* is True and an exact match fails, retries with
+    trailing-whitespace and indent-tolerant matching strategies.
+    """
     if old_text == "":
         return {"ok": False, "error": "empty_old_text", "path": path}
 
@@ -34,8 +39,29 @@ def apply_text_patch(
         return read_result
 
     content = str(read_result["content"])
+
+    def _do_replace(match_key: str) -> dict[str, object]:
+        occ = content.count(match_key)
+        mr = occ if replace_all else 1
+        updated = content.replace(match_key, new_text, mr)
+        wr = workspace.write_text(path, updated)
+        if not wr["ok"]:
+            return wr
+        return {
+            "ok": True,
+            "path": wr["path"],
+            "relative_path": wr["relative_path"],
+            "replacements": mr,
+            "bytes": wr["bytes"],
+        }
+
     occurrences = content.count(old_text)
-    if occurrences == 0:
+    if occurrences > 0:
+        result = _do_replace(old_text)
+        result["match_strategy"] = "exact"
+        return result
+
+    if not fuzzy:
         return {
             "ok": False,
             "error": "patch_mismatch",
@@ -44,18 +70,57 @@ def apply_text_patch(
             "message": "old_text was not found in the target file.",
         }
 
-    max_replacements = occurrences if replace_all else 1
-    updated = content.replace(old_text, new_text, max_replacements)
-    write_result = workspace.write_text(path, updated)
-    if not write_result["ok"]:
-        return write_result
+    match_key = _fuzzy_find(content, old_text)
+    if match_key is not None:
+        result = _do_replace(match_key)
+        result["match_strategy"] = "fuzzy"
+        return result
+
     return {
-        "ok": True,
-        "path": write_result["path"],
-        "relative_path": write_result["relative_path"],
-        "replacements": max_replacements,
-        "bytes": write_result["bytes"],
+        "ok": False,
+        "error": "patch_mismatch",
+        "path": path,
+        "relative_path": read_result.get("relative_path", path),
+        "message": "old_text was not found in the target file (fuzzy matching also failed).",
     }
+
+
+# ---------------------------------------------------------------------------
+# fuzzy matching helpers
+# ---------------------------------------------------------------------------
+
+
+def _fuzzy_find(content: str, old_text: str) -> str | None:
+    """Locate *old_text* in *content* with fuzzy line-by-line matching.
+
+    Tries two strategies in order:
+    1. Trailing-whitespace tolerance (compare lines with rstrip)
+    2. Indent tolerance (compare lines with lstrip, trust the file's indentation)
+
+    Returns the actual matching text from *content* so it can be used as an
+    exact replacement key, or ``None`` if no match found.
+    """
+    old_lines = old_text.splitlines()
+    content_lines = content.splitlines()
+    n = len(old_lines)
+    if n == 0 or n > len(content_lines):
+        return None
+
+    # Strategy 1: trailing whitespace tolerance
+    old_stripped = [l.rstrip() for l in old_lines]
+    content_stripped = [l.rstrip() for l in content_lines]
+    for i in range(len(content_stripped) - n + 1):
+        if all(content_stripped[i + j] == old_stripped[j] for j in range(n)):
+            return "\n".join(content_lines[i : i + n])
+
+    # Strategy 2: indent tolerance
+    old_noindent = [l.lstrip() for l in old_lines]
+    content_noindent = [l.lstrip() for l in content_lines]
+    for i in range(len(content_noindent) - n + 1):
+        if all(content_noindent[i + j] == old_noindent[j] for j in range(n)):
+            return "\n".join(content_lines[i : i + n])
+
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -159,16 +159,16 @@ async def _get_agent() -> HermesAgent:
             "otherwise directed below. Be targeted and efficient in your "
             "exploration and investigations."
         )
+        _skills = SkillManager(base_dir="skills/")
         workspace_path = os.getenv("HERMES_WORKSPACE", "")
         if workspace_path:
             workspace = Workspace(workspace_path)
             permission_policy = PermissionPolicy()
-            register_coding_tools(tools, workspace, permission_policy)
+            register_coding_tools(tools, workspace, permission_policy, skill_manager=_skills)
             persona = base_persona + "\n\n" + build_coding_prompt(workspace, permission_policy)
         else:
             persona = base_persona
 
-        _skills = SkillManager(base_dir="skills/")
         _memory = MemoryManager()
 
         _agent = HermesAgent(
