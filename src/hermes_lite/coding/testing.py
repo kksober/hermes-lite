@@ -364,6 +364,8 @@ def debug_error(
                     )
                 except (OSError, UnicodeDecodeError):
                     context = f"(could not read {fpath})"
+            else:
+                context = f"(could not read {fpath})"
             frames.append({
                 "file": fpath,
                 "line": lineno,

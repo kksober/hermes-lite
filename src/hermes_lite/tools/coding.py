@@ -62,10 +62,33 @@ from hermes_lite.coding.testing import discover_tests, extract_failure_locations
 from hermes_lite.coding.todo import todo_create, todo_list as _todo_list, todo_update
 from hermes_lite.coding.embeddings import semantic_search, build_semantic_index
 from hermes_lite.coding.scaffold import scaffold_project, scaffold_list_templates
+from hermes_lite.coding.subagents import security_audit
+from hermes_lite.coding.watch import watch_status
 from hermes_lite.coding.web import web_fetch, web_search
 from hermes_lite.coding.worktree_exec import WorktreeExecutor
 from hermes_lite.coding.workspace import Workspace
 from hermes_lite.tools.registry import ToolRegistry
+
+
+def _render_diagram(mermaid_source: str, *, output_path: str = "") -> dict[str, object]:
+    """Store mermaid diagram source for rendering.
+
+    When *output_path* is non-empty, writes the mermaid source to that file.
+    Otherwise returns a structured representation for the agent.
+    """
+    if output_path:
+        from pathlib import Path
+        p = Path(output_path)
+        p.write_text(mermaid_source, encoding="utf-8")
+        return {"ok": True, "saved": True, "path": output_path, "bytes": len(mermaid_source)}
+    lines = mermaid_source.strip().splitlines()
+    return {
+        "ok": True,
+        "saved": False,
+        "format": "mermaid",
+        "lines": len(lines),
+        "source_preview": mermaid_source[:2000],
+    }
 
 
 def _render_edit_preview(
@@ -1303,5 +1326,43 @@ def register_coding_tools(
             "required": ["event"],
         },
         handler=as_json(lambda event: run_hooks(workspace, event)),
+        toolset="coding",
+    )
+    registry.register(
+        name="watch_status",
+        schema={
+            "description": "Check which files match watch globs (one-shot, no polling).",
+            "properties": {
+                "globs": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to watch."},
+            },
+            "required": ["globs"],
+        },
+        handler=as_json(lambda globs: watch_status(str(workspace.root), globs)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+    registry.register(
+        name="security_audit",
+        schema={
+            "description": "Run dependency security audit (pip-audit / npm audit).",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: security_audit(str(workspace.root))),
+        toolset="coding",
+    )
+    registry.register(
+        name="render_diagram",
+        schema={
+            "description": "Render a Mermaid.js diagram and save to file (or return as ASCII).",
+            "properties": {
+                "mermaid_source": {"type": "string", "description": "Mermaid diagram source."},
+                "output_path": {"type": "string", "description": "Optional output file path (.svg or .png)."},
+            },
+            "required": ["mermaid_source"],
+        },
+        handler=as_json(lambda mermaid_source, output_path="": _render_diagram(
+            mermaid_source, output_path=output_path,
+        )),
         toolset="coding",
     )

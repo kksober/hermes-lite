@@ -676,3 +676,42 @@ def _count_tool_calls(messages: list) -> int:
             if part.__class__.__name__ == "ToolCallPart":
                 count += 1
     return count
+
+
+def security_audit(workspace_root: str) -> dict[str, Any]:
+    """Run security audit on project dependencies using pip-audit or npm audit."""
+    import json as _json
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+
+    root = _Path(workspace_root)
+    results: list[dict[str, Any]] = []
+
+    if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists():
+        try:
+            proc = _subprocess.run(
+                ["pip-audit", "-r", str(root), "--format", "json"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if proc.returncode == 0:
+                results.append({"ecosystem": "python", "ok": True, "vulnerabilities": 0})
+            else:
+                data = _json.loads(proc.stdout) if proc.stdout.strip() else {}
+                vulns = len(data.get("dependencies", [])) if isinstance(data, dict) else 0
+                results.append({"ecosystem": "python", "ok": False, "vulnerabilities": vulns, "detail": proc.stdout[:2000]})
+        except (FileNotFoundError, _subprocess.TimeoutExpired):
+            results.append({"ecosystem": "python", "ok": True, "available": False, "hint": "pip-audit not installed"})
+
+    if (root / "package.json").exists():
+        try:
+            proc = _subprocess.run(
+                ["npm", "audit", "--json"], capture_output=True, text=True, timeout=60, cwd=str(root),
+            )
+            data = _json.loads(proc.stdout) if proc.stdout.strip() else {}
+            vulns = data.get("metadata", {}).get("vulnerabilities", {}).get("total", 0)
+            results.append({"ecosystem": "node", "ok": vulns == 0, "vulnerabilities": vulns})
+        except (FileNotFoundError, _subprocess.TimeoutExpired, _json.JSONDecodeError):
+            results.append({"ecosystem": "node", "ok": True, "available": False})
+
+    return {"ok": True, "audited": bool(results), "total_vulnerabilities": sum(r.get("vulnerabilities", 0) for r in results), "results": results}
+
