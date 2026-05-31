@@ -158,3 +158,92 @@ def _generate_summary(conversation_text: str, model_name: str) -> str:
         if len(conversation_text) <= 500:
             return conversation_text
         return conversation_text[:500] + "..."
+
+
+
+class ContextWindow:
+    """Track and manage token usage within a model context window.
+
+    Parameters
+    ----------
+    max_tokens:
+        Total context window size for the model (e.g. 128000 for GPT-4o).
+    threshold:
+        Fraction of *max_tokens* at which auto-compression triggers
+        (default 0.8 = 80%).
+    keep_recent:
+        Number of most-recent messages to keep verbatim when compressing.
+    """
+
+    def __init__(
+        self,
+        max_tokens: int,
+        threshold: float = 0.8,
+        keep_recent: int = 10,
+    ) -> None:
+        self.max_tokens = max_tokens
+        self.threshold = threshold
+        self.keep_recent = keep_recent
+        self._compress_count = 0
+        self._tokens_used: dict[str, int] = {"prompt": 0, "completion": 0}
+
+    # ------------------------------------------------------------------
+    # query
+    # ------------------------------------------------------------------
+
+    def estimate(self, messages: list[dict[str, Any]]) -> int:
+        """Return estimated token count for *messages*."""
+        return estimate_tokens(messages)
+
+    def usage_ratio(self, messages: list[dict[str, Any]]) -> float:
+        """Return 0.0–1.0 fraction of window used by *messages*."""
+        if self.max_tokens <= 0:
+            return 0.0
+        return self.estimate(messages) / self.max_tokens
+
+    def needs_compression(self, messages: list[dict[str, Any]]) -> bool:
+        """Check whether the message list should be compressed."""
+        return self.estimate(messages) > int(self.max_tokens * self.threshold)
+
+    # ------------------------------------------------------------------
+    # mutate
+    # ------------------------------------------------------------------
+
+    def compress_if_needed(
+        self, messages: list[dict[str, Any]], model_name: str = "",
+    ) -> list[dict[str, Any]]:
+        """Auto-compress *messages* when above threshold.
+
+        Returns the compressed list (or original if no compression needed).
+        """
+        if not self.needs_compression(messages):
+            return messages
+        self._compress_count += 1
+        return compress(messages, model_name or "gpt-4o", keep_recent=self.keep_recent)
+
+    def record_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
+        """Accumulate token usage from a completed call."""
+        self._tokens_used["prompt"] += prompt_tokens
+        self._tokens_used["completion"] += completion_tokens
+
+    def clear(self) -> None:
+        """Reset compression counter and usage tracking."""
+        self._compress_count = 0
+        self._tokens_used = {"prompt": 0, "completion": 0}
+
+    # ------------------------------------------------------------------
+    # properties
+    # ------------------------------------------------------------------
+
+    @property
+    def compress_count(self) -> int:
+        return self._compress_count
+
+    @property
+    def tokens_used(self) -> dict[str, int]:
+        return dict(self._tokens_used)
+
+    @property
+    def token_budget_remaining(self) -> int:
+        used = self._tokens_used["prompt"] + self._tokens_used["completion"]
+        return max(0, self.max_tokens - used)

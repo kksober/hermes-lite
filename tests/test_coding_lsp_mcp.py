@@ -198,7 +198,7 @@ def test_new_tools_registered(tmp_path) -> None:
         "lsp_status", "lsp_diagnostics", "lsp_symbols", "lsp_definition",
         "lsp_references", "lsp_hover",
         "mcp_status", "mcp_connect", "mcp_list_tools", "mcp_call_tool",
-        "subagent_execute",
+        "subagent_execute", "subagent_plan", "subagent_dispatch",
         "discover_tests", "run_tests",
         "read_rules", "workspace_context",
         "web_search", "web_fetch",

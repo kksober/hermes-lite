@@ -33,6 +33,7 @@ class PermissionDecision:
     target: str
     reason: str
     message: str = ""
+    edit_preview: str = ""
 
     @property
     def allowed(self) -> bool:
@@ -51,7 +52,7 @@ class PermissionDecision:
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-ready representation."""
-        return {
+        d: dict[str, object] = {
             "action": self.action,
             "allowed": self.allowed,
             "requires_approval": self.requires_approval,
@@ -61,6 +62,9 @@ class PermissionDecision:
             "reason": self.reason,
             "message": self.message,
         }
+        if self.edit_preview:
+            d["edit_preview"] = self.edit_preview
+        return d
 
 
 @dataclass
@@ -111,6 +115,7 @@ class PermissionPolicy:
         *,
         ask_timeout: float = 60.0,
         headless_webhook: str = "",
+        edit_confirm: bool = True,
     ) -> None:
         self.mode = mode
         self.interactive = interactive
@@ -119,6 +124,7 @@ class PermissionPolicy:
         self._authorizations: list[SessionAuthorization] = []
         self.ask_timeout = ask_timeout
         self.headless_webhook = headless_webhook
+        self.edit_confirm = edit_confirm
 
     # ------------------------------------------------------------------
     # session authorizations
@@ -220,6 +226,9 @@ class PermissionPolicy:
         """Decide whether a file write may proceed."""
         if not check.ok:
             return self.deny("write", check.relative_path or str(check.path), check.error, check.reason)
+        if self.edit_confirm and self.confirm is not None:
+            return self.ask_decision("write", check.relative_path, "edit_confirm",
+                                     f"Confirm edit to {check.relative_path}")
         return self.allow("write", check.relative_path, "workspace_write")
 
     # ------------------------------------------------------------------

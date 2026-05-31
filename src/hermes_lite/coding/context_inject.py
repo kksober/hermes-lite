@@ -22,6 +22,8 @@ _RULES_CANDIDATES = [
     ".cursorrules",
 ]
 
+_CONVENTIONS_PATH = ".hermes/conventions.md"
+
 _DEFAULT_MAX_RULES_CHARS = 3000
 
 
@@ -47,6 +49,22 @@ def discover_rules(workspace_root: Path, max_chars: int = _DEFAULT_MAX_RULES_CHA
             except (OSError, UnicodeDecodeError):
                 continue
     return {"found": False, "source": "", "content": ""}
+
+
+def discover_conventions(workspace_root: Path, max_chars: int = 2000) -> dict[str, Any]:
+    """Find and read coding conventions from ``.hermes/conventions.md``.
+
+    Returns:
+        ``{found: bool, content: str}``
+    """
+    path = workspace_root / _CONVENTIONS_PATH
+    if path.exists() and path.is_file():
+        try:
+            raw = path.read_text(encoding="utf-8")
+            return {"found": True, "content": raw[:max_chars]}
+        except (OSError, UnicodeDecodeError):
+            pass
+    return {"found": False, "content": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +173,16 @@ def build_context_preamble(
             f"</project_rules>"
         )
 
-    # 2. Workspace snapshot
+    # 2. Coding conventions
+    conventions = discover_conventions(workspace_root)
+    if conventions["found"]:
+        parts.append(
+            f"<coding_conventions>\n"
+            f"{conventions['content']}\n"
+            f"</coding_conventions>"
+        )
+
+    # 3. Workspace snapshot
     snap = workspace_snapshot(workspace_root)
     if snap.get("branch"):
         lines = [
@@ -178,3 +205,71 @@ def build_context_preamble(
     if len(preamble) > max_chars:
         preamble = preamble[:max_chars] + "\n..."
     return preamble
+
+
+# ---------------------------------------------------------------------------
+# per-turn context (lightweight, inject every turn)
+# ---------------------------------------------------------------------------
+
+_FRAMEWORK_INDICATORS: dict[str, tuple[str, str]] = {
+    "pyproject.toml": ("Python", "uv/poetry/setuptools"),
+    "package.json": ("Node.js / TypeScript", "npm/yarn/pnpm"),
+    "go.mod": ("Go", "mod"),
+    "Cargo.toml": ("Rust", "cargo"),
+    "Gemfile": ("Ruby", "bundler"),
+    "build.gradle": ("Java / Kotlin (Gradle)", "gradle"),
+    "pom.xml": ("Java (Maven)", "maven"),
+    "Makefile": ("C/C++", "make"),
+    "CMakeLists.txt": ("C/C++", "cmake"),
+    "Dockerfile": ("Docker", "docker"),
+}
+
+
+def detect_frameworks(workspace_root: Path) -> dict[str, Any]:
+    """Detect project language/framework from config files.
+
+    Returns a dict with ``language``, ``build_system``, and ``files`` keys.
+    """
+    detected: list[dict[str, str]] = []
+    for filename, (lang, build) in _FRAMEWORK_INDICATORS.items():
+        if (workspace_root / filename).exists():
+            detected.append({"file": filename, "language": lang, "build_system": build})
+
+    language = detected[0]["language"] if detected else "unknown"
+    build_system = detected[0]["build_system"] if detected else "unknown"
+    return {
+        "language": language,
+        "build_system": build_system,
+        "files": [d["file"] for d in detected],
+    }
+
+
+def per_turn_context(workspace_root: Path) -> str:
+    """Build a sub-200-token context snippet for per-turn injection.
+
+    Returns an empty string when git is unavailable.
+    """
+    snap = workspace_snapshot(workspace_root)
+    if not snap.get("branch") or snap["branch"] == "unknown":
+        return ""
+
+    lines = ["<workspace_state>"]
+    lines.append(f"branch: {snap['branch']}")
+    if snap.get("last_commit"):
+        lines.append(f"HEAD: {snap['last_commit']}")
+    changes = ""
+    if snap.get("staged_files") or snap.get("modified_files"):
+        changes = f"{snap.get('staged_files', 0)} staged, {snap.get('modified_files', 0)} modified"
+        lines.append(f"changes: {changes}")
+    lines.append("</workspace_state>")
+
+    # Framework hint (~1 line)
+    fw = detect_frameworks(workspace_root)
+    if fw["language"] != "unknown":
+        lines.append(f"<project>{fw['language']} ({', '.join(fw['files'])})</project>")
+
+    snippet = "\n".join(lines)
+    # Hard cap at 200 tokens (~800 chars)
+    if len(snippet) > 800:
+        snippet = snippet[:797] + "..."
+    return snippet

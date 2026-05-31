@@ -520,3 +520,159 @@ def approve_plan(
         "run": run.to_dict(),
         "review": review.get("review", {}),
     }
+
+
+# ---------------------------------------------------------------------------
+# LLM-driven sub-agent dispatch
+# ---------------------------------------------------------------------------
+
+# Tool whitelists per role — each role gets only the tools it needs
+_SUBAGENT_TOOLSETS: dict[str, set[str]] = {
+    "planner": {
+        "read_file", "list_files", "search_text", "repo_map",
+        "rank_files", "project_map", "find_test_files", "recent_changes",
+        "workspace_status", "workspace_context", "read_rules",
+    },
+    "builder": {
+        "read_file", "write_file", "apply_patch", "apply_unified_diff",
+        "edit_file", "patch_dry_run", "diff_summary",
+        "run_command", "list_files", "search_text", "git_status", "git_diff",
+        "python_diagnostics", "python_symbols",
+        "discover_tests", "run_tests",
+    },
+    "reviewer": {
+        "read_file", "git_status", "git_diff", "code_review",
+        "diff_summary", "list_files", "search_text",
+        "python_diagnostics", "run_tests",
+    },
+}
+
+
+def get_role_tools(role: str) -> set[str]:
+    """Return the tool whitelist for a sub-agent role."""
+    return _SUBAGENT_TOOLSETS.get(role, set())
+
+
+async def dispatch_subagent(
+    role: str,
+    task: str,
+    *,
+    workspace: Workspace,
+    config: Any,  # ProviderConfig
+    policy: PermissionPolicy,
+    base_persona: str = "",
+    max_turns: int = 20,
+) -> dict[str, object]:
+    """Dispatch a task to an LLM-driven sub-agent with a restricted tool set.
+
+    The sub-agent gets its own ``HermesAgent`` instance with only the tools
+    allowed for its role.  It runs inside the workspace (not a separate
+    worktree) for speed.
+
+    Parameters
+    ----------
+    role:
+        One of ``"planner"``, ``"builder"``, ``"reviewer"``.
+    task:
+        The task description for the sub-agent.
+    workspace:
+        The workspace to operate in.
+    config:
+        ProviderConfig for the LLM.
+    policy:
+        Permission policy (passed through to the sub-agent's tool handler).
+    base_persona:
+        Optional base persona text (prepended to role-specific prompt).
+    max_turns:
+        Maximum tool-call turns before forcing a response.
+
+    Returns
+    -------
+    Structured result with ``output``, ``tool_calls_made``, ``turns``.
+    """
+    # Import here to avoid circular import at module level
+    from hermes_lite.agent import HermesAgent  # noqa: F811
+    from hermes_lite.tools.coding import register_coding_tools
+    from hermes_lite.tools.registry import ToolRegistry
+
+    allowed = get_role_tools(role)
+    if not allowed:
+        return {"ok": False, "error": f"unknown_role: {role}"}
+
+    role_personas = {
+        "planner": (
+            "You are a planning specialist. Inspect the repository structure, "
+            "identify relevant files, and produce a clear, step-by-step "
+            "implementation plan. Do NOT write any code — only read and plan.\n\n"
+            "Output format: numbered list of steps, each with file paths and "
+            "a brief description of what to change."
+        ),
+        "builder": (
+            "You are a code implementation specialist. Follow the plan and "
+            "implement the changes described. Write real, compilable code. "
+            "Run tests after making changes to verify correctness.\n\n"
+            "Be precise — make minimal edits to achieve the goal."
+        ),
+        "reviewer": (
+            "You are a code review specialist. Review the diff, run tests, "
+            "and produce a structured review with findings categorized by "
+            "severity (high/medium/low) and category (security/correctness/style/tests)."
+        ),
+    }
+
+    persona = role_personas.get(role, f"You are a {role} specialist.")
+    if base_persona:
+        persona = base_persona + "\n\n" + persona
+
+    # Build a restricted tool registry
+    full_registry = ToolRegistry()
+    register_coding_tools(full_registry, workspace, policy)
+
+    restricted = ToolRegistry()
+    for tool_info in full_registry.list_tools():
+        name = tool_info["name"]
+        if name in allowed:
+            handler = full_registry._tools[name]["handler"]
+            schema = full_registry._tools[name]["schema"]
+            restricted.register(
+                name=name,
+                schema=schema,
+                handler=handler,
+                toolset="coding",
+                parallel_safe=tool_info.get("parallel_safe", False),
+            )
+
+    # Create sub-agent with restricted tools
+    sub_agent = HermesAgent(
+        config=config,
+        persona=persona,
+        tool_registry=restricted,
+        defer_model_check=True,
+    )
+
+    try:
+        output, _messages = await sub_agent.run(task, max_turns=max_turns)
+        return {
+            "ok": True,
+            "role": role,
+            "output": output,
+            "turns_taken": _count_tool_calls(_messages),
+            "message_count": len(_messages),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "role": role,
+            "error": "subagent_failed",
+            "detail": str(exc),
+        }
+
+
+def _count_tool_calls(messages: list) -> int:
+    """Count tool call parts in a message list."""
+    count = 0
+    for msg in messages:
+        for part in getattr(msg, "parts", []):
+            if part.__class__.__name__ == "ToolCallPart":
+                count += 1
+    return count

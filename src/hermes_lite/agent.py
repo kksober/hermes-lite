@@ -36,6 +36,63 @@ from hermes_lite.tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# model context window sizes (tokens)
+# ---------------------------------------------------------------------------
+
+_MODEL_CONTEXT_SIZES: dict[str, int] = {
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4": 8192,
+    "gpt-3.5-turbo": 16385,
+    "claude-sonnet-4-6": 200000,
+    "claude-opus-4-7": 200000,
+    "claude-haiku-4-5": 200000,
+    "claude-3-5-sonnet": 200000,
+    "deepseek-v4": 131072,
+    "deepseek-v4-pro": 131072,
+    "deepseek-v3": 65536,
+    "deepseek-r1": 131072,
+}
+
+# ---------------------------------------------------------------------------
+# model pricing ($ per 1M tokens) — input / output
+# ---------------------------------------------------------------------------
+
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4-turbo": (10.00, 30.00),
+    "gpt-4": (30.00, 60.00),
+    "gpt-3.5-turbo": (0.50, 1.50),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-opus-4-7": (15.00, 75.00),
+    "claude-haiku-4-5": (0.80, 4.00),
+    "claude-3-5-sonnet": (3.00, 15.00),
+    "deepseek-v4": (0.14, 0.28),
+    "deepseek-v4-pro": (0.14, 0.28),
+    "deepseek-v3": (0.27, 1.10),
+    "deepseek-r1": (0.55, 2.19),
+}
+
+
+def cost_estimate(model: str, prompt_tokens: int, completion_tokens: int) -> dict[str, Any]:
+    """Estimate cost in USD from token counts and model pricing.
+
+    Returns ``{input_cost, output_cost, total_cost, model}``.
+    Prices are in USD per 1M tokens.
+    """
+    input_price, output_price = _MODEL_PRICING.get(model, (0.0, 0.0))
+    input_cost = (prompt_tokens / 1_000_000) * input_price
+    output_cost = (completion_tokens / 1_000_000) * output_price
+    return {
+        "model": model,
+        "input_cost": round(input_cost, 6),
+        "output_cost": round(output_cost, 6),
+        "total_cost": round(input_cost + output_cost, 6),
+    }
+
+# ---------------------------------------------------------------------------
 # error classification
 # ---------------------------------------------------------------------------
 
@@ -71,7 +128,7 @@ def classify_tool_error(result_str: str) -> dict[str, Any]:
     try:
         data = json.loads(result_str)
     except (json.JSONDecodeError, TypeError):
-        data = {}
+        data = None
 
     if isinstance(data, dict):
         ok = data.get("ok", True)
@@ -122,6 +179,45 @@ def build_parallel_hint(registry: ToolRegistry) -> str:
     )
 
 
+def _model_messages_to_dicts(messages: list[Any]) -> list[dict[str, Any]]:
+    """Convert pydantic_ai ModelMessage list to plain dicts for token estimation."""
+    result: list[dict[str, Any]] = []
+    for msg in messages:
+        role = "system" if hasattr(msg, "parts") and any(
+            "SystemPromptPart" in str(type(p)) for p in msg.parts
+        ) else "user"
+        content = ""
+        if hasattr(msg, "parts"):
+            parts_content: list[str] = []
+            for p in msg.parts:
+                if hasattr(p, "content"):
+                    parts_content.append(str(p.content))
+                elif hasattr(p, "text"):
+                    parts_content.append(str(p.text))
+                else:
+                    parts_content.append(str(p))
+            content = " ".join(parts_content)
+        result.append({"role": role, "content": content})
+    return result
+
+
+def _dicts_to_model_messages(dicts: list[dict[str, Any]]) -> list[Any]:
+    """Convert plain dicts back to pydantic_ai ModelMessage objects."""
+    from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, UserPromptPart, TextPart
+
+    result: list[Any] = []
+    for d in dicts:
+        role = d.get("role", "user")
+        content = d.get("content", "")
+        if role == "system":
+            result.append(ModelRequest(parts=[SystemPromptPart(content=content)]))
+        elif role == "assistant":
+            result.append(ModelResponse(parts=[TextPart(content=content)]))
+        else:
+            result.append(ModelRequest(parts=[UserPromptPart(content=content)]))
+    return result
+
+
 class HermesAgent:
     """Main agent class — builds the system prompt, runs the multi-turn loop.
 
@@ -166,6 +262,15 @@ class HermesAgent:
         self._total_prompt_tokens = 0
         self._total_completion_tokens = 0
         self._call_count = 0
+        # Error recovery tracking
+        self._error_counts: dict[str, int] = {}
+        self._consecutive_errors = 0
+        self._max_consecutive_errors = 10
+        # Context window management
+        from hermes_lite.compression import ContextWindow
+        ctx_size = _MODEL_CONTEXT_SIZES.get(config.model, 128000)
+        self._context_window = ContextWindow(ctx_size, threshold=0.8, keep_recent=10)
+        self._pending_resume_messages: list[Any] | None = None
 
     @property
     def config(self) -> ProviderConfig:
@@ -199,16 +304,24 @@ class HermesAgent:
 
     @property
     def usage(self) -> dict[str, object]:
-        """Return cumulative token usage for this session."""
+        """Return cumulative token usage for this session with cost estimate."""
+        cost = cost_estimate(
+            self._config.model,
+            self._total_prompt_tokens,
+            self._total_completion_tokens,
+        )
         return {
             "prompt_tokens": self._total_prompt_tokens,
             "completion_tokens": self._total_completion_tokens,
             "total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
             "call_count": self._call_count,
+            "model": self._config.model,
+            "cost_usd": cost["total_cost"],
+            "cost_detail": cost,
         }
 
     def _log_tool_failures(self, response_parts: list) -> int:
-        """Log tool failures and return the count of failed tools."""
+        """Log tool failures, track error counts, and return the count of failed tools."""
         failed_count = 0
         for msg in response_parts:
             for part in msg.parts:
@@ -218,13 +331,91 @@ class HermesAgent:
                     if classification["category"] != "ok":
                         failed_count += 1
                         tool_name = getattr(part, "tool_name", "unknown")
+                        cat = classification["category"]
+                        self._error_counts[cat] = self._error_counts.get(cat, 0) + 1
                         logger.warning(
-                            "tool_failed tool=%s category=%s retryable=%s hint=%s",
-                            tool_name, classification["category"],
+                            "tool_failed tool=%s category=%s count=%d retryable=%s hint=%s",
+                            tool_name, cat, self._error_counts[cat],
                             classification["retryable"],
                             classification["hint"][:120],
                         )
+        if failed_count > 0:
+            self._consecutive_errors += 1
+        else:
+            self._consecutive_errors = 0
         return failed_count
+
+    def _build_error_recovery_prompt(self) -> str:
+        """Build an error recovery prompt when errors accumulate.
+
+        Injects corrective guidance when the same error repeats or when
+        consecutive errors exceed a threshold.
+        """
+        if self._consecutive_errors == 0:
+            return ""
+
+        parts: list[str] = []
+
+        # Repeated same-category errors
+        for cat, count in self._error_counts.items():
+            if count >= 3:
+                for pattern_key, (_retry, hint) in _ERROR_PATTERNS.items():
+                    if pattern_key == cat:
+                        parts.append(f"  - You have hit '{cat}' {count} times. {hint}")
+                        break
+
+        if self._consecutive_errors >= 5:
+            parts.append(
+                "  - You have had 5+ consecutive tool errors. "
+                "Try a different approach instead of retrying the same action."
+            )
+
+        if self._consecutive_errors >= self._max_consecutive_errors:
+            parts.append(
+                "  - ERROR LIMIT REACHED. Stop retrying and explain the problem to the user."
+            )
+
+        if not parts:
+            return ""
+
+        return (
+            "\n## Recent Tool Errors\n"
+            "Some of your recent tool calls have failed. Please adjust your approach:\n"
+            + "\n".join(parts)
+        )
+
+    def _reset_error_state(self) -> None:
+        """Reset error tracking for a new conversation."""
+        self._error_counts.clear()
+        self._consecutive_errors = 0
+
+    def clear_context(self) -> dict[str, object]:
+        """Clear conversation history and reset context window.
+
+        Call this to start fresh without restarting the CLI.
+        Returns a status dict.
+        """
+        self._last_messages = []
+        self._reset_error_state()
+        self._context_window.clear()
+        return {
+            "ok": True,
+            "message": "Conversation history cleared. Starting fresh.",
+            "compress_count_reset": self._context_window.compress_count == 0,
+        }
+
+    def set_message_history(self, messages: list[dict[str, Any]]) -> None:
+        """Set the message history from a previously saved session.
+
+        Converts plain dicts to pydantic_ai ModelMessage objects
+        so they can be passed to ``run()`` as ``message_history``.
+        """
+        self._pending_resume_messages = _dicts_to_model_messages(messages)
+
+    @property
+    def context_window(self):
+        """Access the ContextWindow tracker (for inspection/CLI)."""
+        return self._context_window
 
     async def _call_with_retry(
         self,
@@ -360,6 +551,11 @@ class HermesAgent:
         if parallel_hint:
             parts.append(parallel_hint)
 
+        # Inject error recovery guidance when errors are accumulating
+        error_prompt = self._build_error_recovery_prompt()
+        if error_prompt:
+            parts.append(error_prompt)
+
         return "\n".join(parts)
 
     async def run(
@@ -403,6 +599,20 @@ class HermesAgent:
                 ModelRequest(parts=[SystemPromptPart(content=system_prompt)]),
                 ModelRequest(parts=[UserPromptPart(content=user_input)]),
             ]
+
+        # Check context window and auto-compress if needed
+        if message_history is not None:
+            msg_dicts = _model_messages_to_dicts(messages)
+            ratio_before = self._context_window.usage_ratio(msg_dicts)
+            if self._context_window.needs_compression(msg_dicts):
+                compressed_dicts = self._context_window.compress_if_needed(
+                    msg_dicts, self._config.model,
+                )
+                messages = _dicts_to_model_messages(compressed_dicts)
+                ratio_after = self._context_window.usage_ratio(compressed_dicts)
+                self._last_context_ratio = ratio_after
+                if self._context_window.compress_count == 1:
+                    pass  # first compression, silent
 
         turn = 0
         result: Any = None

@@ -49,6 +49,7 @@ def hook_status(workspace: Workspace, path: str = ".hermes/hooks.json") -> dict[
             "event": event,
             "command": command,
             "enabled": bool(item.get("enabled", True)),
+            "auto_trigger": item.get("auto_trigger", []),
         })
     return {"ok": True, "config_path": path, "hooks": hooks}
 
@@ -118,6 +119,47 @@ def _run_single_hook(hook: dict[str, Any], workspace: Workspace) -> dict[str, ob
         return {"ok": False, "error": "timeout", "hook_event": hook.get("event")}
     except Exception as exc:
         return {"ok": False, "error": "execution_failed", "detail": str(exc), "hook_event": hook.get("event")}
+
+
+def run_post_edit_hooks(workspace: Workspace, file_path: str) -> dict[str, Any]:
+    """Run hooks configured with ``"auto_trigger": ["post_edit"]``.
+
+    Called automatically after a file is edited via write_file, edit_file,
+    apply_patch, or apply_unified_diff.  Returns a summary of hook results.
+    """
+    hooks_config = hook_status(workspace)
+    if not hooks_config.get("ok"):
+        return {"ok": True, "ran": 0, "results": [], "message": "No hooks config found."}
+
+    post_edit_hooks = []
+    for h in hooks_config.get("hooks", []):
+        if not isinstance(h, dict):
+            continue
+        if not h.get("enabled", True):
+            continue
+        auto_triggers = h.get("auto_trigger", [])
+        if isinstance(auto_triggers, list) and "post_edit" in auto_triggers:
+            post_edit_hooks.append(h)
+
+    if not post_edit_hooks:
+        return {"ok": True, "ran": 0, "results": [], "message": "No post_edit hooks configured."}
+
+    results = []
+    for h in post_edit_hooks:
+        cmd = str(h.get("command", ""))
+        # Substitute {file} placeholder
+        cmd = cmd.replace("{file}", file_path)
+        expanded_hook = dict(h, command=cmd)
+        result = _run_single_hook(expanded_hook, workspace)
+        results.append(result)
+
+    failures = [r for r in results if not r.get("ok")]
+    return {
+        "ok": True,
+        "ran": len(results),
+        "failed": len(failures),
+        "results": results,
+    }
 
 
 def _load_json_config(workspace: Workspace, path: str, *, missing_key: str) -> dict[str, Any]:

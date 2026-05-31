@@ -316,3 +316,71 @@ def extract_failure_locations(parsed_result: dict[str, Any]) -> list[dict[str, A
                 "message": f.get("message", ""),
             })
     return locations
+
+
+_TRACEBACK_FILE_RE = re.compile(
+    r'^\s*File "(.+?)", line (\d+), in (\S+)'
+)
+_TRACEBACK_ASSERT_RE = re.compile(r"^\s*(?:> )?(.+?Error|AssertionError):?\s*(.*)")
+
+
+def debug_error(
+    workspace: Workspace,
+    traceback_text: str,
+    *,
+    context_lines: int = 5,
+) -> dict[str, Any]:
+    """Parse a traceback string and return source context around each frame.
+
+    For each ``File "...", line N, in <name>`` frame, reads *context_lines*
+    before and after the referenced line.  Also extracts the final error type
+    and message.
+
+    Returns
+    -------
+    ``{ok, frames: [{file, line, function, context}], error_type, error_message}``
+    """
+    frames: list[dict[str, Any]] = []
+    error_type = ""
+    error_message = ""
+
+    for line in traceback_text.splitlines():
+        m = _TRACEBACK_FILE_RE.search(line)
+        if m:
+            fpath = m.group(1)
+            lineno = int(m.group(2))
+            func = m.group(3)
+            # Read source context
+            src_path = workspace.root / fpath
+            context = ""
+            if src_path.exists():
+                try:
+                    src_lines = src_path.read_text(encoding="utf-8").splitlines()
+                    start = max(0, lineno - context_lines - 1)
+                    end = min(len(src_lines), lineno + context_lines)
+                    context = "\n".join(
+                        f"{i + 1}: {src_lines[i]}"
+                        for i in range(start, end)
+                    )
+                except (OSError, UnicodeDecodeError):
+                    context = f"(could not read {fpath})"
+            frames.append({
+                "file": fpath,
+                "line": lineno,
+                "function": func,
+                "context": context[:2000],
+            })
+            continue
+        ma = _TRACEBACK_ASSERT_RE.match(line)
+        if ma:
+            error_type = ma.group(1)
+            error_message = ma.group(2)
+            continue
+
+    return {
+        "ok": True,
+        "frames": frames,
+        "frame_count": len(frames),
+        "error_type": error_type,
+        "error_message": error_message,
+    }

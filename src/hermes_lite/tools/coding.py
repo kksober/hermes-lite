@@ -24,6 +24,8 @@ from hermes_lite.coding.notebook import (
     notebook_read_all_cells,
     notebook_read_cell,
 )
+import asyncio
+
 from hermes_lite.coding.notify import notify as _notify_send
 from hermes_lite.coding.git import GitClient
 from hermes_lite.coding.lsp import (
@@ -48,6 +50,7 @@ from hermes_lite.coding.shell import CommandRunner
 from hermes_lite.coding.subagents import (
     approve_plan,
     create_subagent_plan,
+    dispatch_subagent,
     execute_subagent_plan,
     list_plans,
     run_code_review,
@@ -55,12 +58,71 @@ from hermes_lite.coding.subagents import (
     subagent_execute_with_commands,
 )
 from hermes_lite.coding.context_inject import discover_rules, workspace_snapshot
-from hermes_lite.coding.testing import discover_tests, extract_failure_locations, run_tests
+from hermes_lite.coding.testing import discover_tests, extract_failure_locations, run_tests, debug_error
 from hermes_lite.coding.todo import todo_create, todo_list as _todo_list, todo_update
+from hermes_lite.coding.embeddings import semantic_search, build_semantic_index
+from hermes_lite.coding.scaffold import scaffold_project, scaffold_list_templates
 from hermes_lite.coding.web import web_fetch, web_search
 from hermes_lite.coding.worktree_exec import WorktreeExecutor
 from hermes_lite.coding.workspace import Workspace
 from hermes_lite.tools.registry import ToolRegistry
+
+
+def _render_edit_preview(
+    path: str, old_text: str, new_text: str, dry: dict[str, object],
+) -> str:
+    """Render a human-readable diff preview from edit parameters."""
+    lines: list[str] = []
+    lines.append(f"File: {path}")
+    matches = dry.get("matches", 0)
+    lines.append(f"Matches: {matches}")
+    if old_text:
+        lines.append(f"\n- {old_text.strip()}")
+    if new_text:
+        lines.append(f"+ {new_text.strip()}")
+    return "\n".join(lines)
+
+
+def _apply_patch_with_confirm(
+    workspace: Workspace, policy: PermissionPolicy,
+    path: str, old_text: str, new_text: str, *, replace_all: bool = False,
+) -> dict[str, object]:
+    """Apply a text patch with edit confirmation when interactive."""
+    check = workspace.resolve(path, operation="write")
+    decision = policy.decide_write(check)
+    if decision.denied:
+        result: dict[str, object] = decision.to_dict()
+        result.update({"ok": False, "error": "permission_denied", "reason": decision.reason})
+        return result
+    if decision.requires_approval:
+        current = workspace.read_text(path)
+        old_content = current.get("content", "") if current.get("ok") else ""
+        dry = apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all, dry_run=True)
+        diff_text = _render_edit_preview(path, old_text, new_text, dry)
+        decision.edit_preview = f"Patch preview for {path}:\n{diff_text}"
+        if not policy.confirm(decision):
+            return {"ok": False, "error": "edit_rejected",
+                    "message": f"Patch to {path} was not confirmed."}
+    return apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all)
+
+
+def _apply_unified_diff_with_confirm(
+    workspace: Workspace, policy: PermissionPolicy,
+    path: str, diff_text: str, *, dry_run: bool = False, fuzzy: int = 0,
+) -> dict[str, object]:
+    """Apply a unified diff with edit confirmation when interactive."""
+    check = workspace.resolve(path, operation="write")
+    decision = policy.decide_write(check)
+    if decision.denied:
+        result: dict[str, object] = decision.to_dict()
+        result.update({"ok": False, "error": "permission_denied", "reason": decision.reason})
+        return result
+    if decision.requires_approval and not dry_run:
+        decision.edit_preview = f"Unified diff for {path}:\n{diff_text[:2000]}"
+        if not policy.confirm(decision):
+            return {"ok": False, "error": "edit_rejected",
+                    "message": f"Unified diff to {path} was not confirmed."}
+    return apply_unified_diff(workspace, path, diff_text, dry_run=dry_run, fuzzy=fuzzy)
 
 
 def register_coding_tools(
@@ -85,25 +147,21 @@ def register_coding_tools(
         *, replace_all: bool = False, preview_only: bool = False,
     ) -> dict[str, object]:
         """Unified edit entry point: dry_run first, then apply or preview."""
-        # Validate path
         check = workspace.resolve(path, operation="write")
         decision = policy.decide_write(check)
-        if not decision.allowed:
+        if decision.denied:
             result = decision.to_dict()
             result.update({"ok": False, "error": "permission_denied", "reason": decision.reason})
             return result
 
-        # Read current content for diff preview
         current = workspace.read_text(path)
         old_content = current.get("content", "") if current.get("ok") else ""
 
-        # Dry run to validate
         dry = apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all, dry_run=True)
         if not dry.get("ok"):
             return dry
 
         if preview_only:
-            # Generate preview diff
             preview = diff_summary(workspace, path, old_content)
             return {
                 "ok": True,
@@ -115,14 +173,97 @@ def register_coding_tools(
                 "removed_lines": preview.get("removed_lines", 0),
             }
 
-        # Apply the change
+        # Show diff preview and ask for confirmation when in interactive mode
+        if decision.requires_approval:
+            preview = diff_summary(workspace, path, old_content)
+            diff_text = preview.get("diff_preview", "") or _render_edit_preview(
+                path, old_text, new_text, dry,
+            )
+            decision.edit_preview = f"Edit preview for {path}:\n{diff_text}"
+            if not policy.confirm(decision):
+                return {"ok": False, "error": "edit_rejected",
+                        "message": f"Edit to {path} was not confirmed."}
+
         result = apply_text_patch(workspace, path, old_text, new_text, replace_all=replace_all)
-        # Get diff for the applied change
-        new_content = workspace.read_text(path).get("content", "")
         preview = diff_summary(workspace, path, old_content) if old_content else {"diff_preview": ""}
         result["diff_preview"] = preview.get("diff_preview", "")
         result["preview_only"] = False
+        # Run post-edit hooks (lint, format, etc.)
+        if result.get("ok"):
+            try:
+                from hermes_lite.coding.extensibility import run_post_edit_hooks
+                hooks_result = run_post_edit_hooks(workspace, path)
+                if hooks_result.get("ran", 0) > 0:
+                    result["post_edit_hooks"] = hooks_result
+            except Exception:
+                pass
         return result
+
+    def _dispatch_sync(
+        role: str, task: str, ws: Workspace, pol: PermissionPolicy,
+        executor: WorktreeExecutor,
+    ) -> dict[str, object]:
+        """Sync sub-agent dispatch: creates worktree, runs role commands, returns result."""
+        from hermes_lite.coding.subagents import create_subagent_plan, _SUBAGENT_TOOLSETS
+
+        if role not in ("planner", "builder", "reviewer"):
+            return {"ok": False, "error": f"unknown_role: {role}"}
+
+        plan = create_subagent_plan(task)
+        create_result = executor.create_run(task, roles=[role])
+        if not create_result.get("ok"):
+            return create_result
+
+        raw_run = create_result["run"]
+        run = _reconstruct_run_for_dispatch(raw_run, executor)
+
+        # Role-specific discovery commands
+        role_commands: dict[str, list[str]] = {
+            "planner": [
+                "find . -type f -name '*.py' | head -30",
+                "cat pyproject.toml 2>/dev/null || cat setup.py 2>/dev/null || echo 'no project config'",
+                "ls -la tests/ 2>/dev/null || ls -la test/ 2>/dev/null || echo 'no tests dir'",
+            ],
+            "builder": [
+                f"echo 'Task: {task}'",
+                "find . -type f -name '*.py' | head -20",
+            ],
+            "reviewer": [
+                "git diff --stat 2>/dev/null || echo 'no git diff'",
+                "git diff 2>/dev/null | head -100 || echo 'no changes'",
+            ],
+        }
+
+        cmds = role_commands.get(role, ["echo 'no commands defined'"])
+        step = executor.execute_step(run, 0, commands=cmds)
+
+        return {
+            "ok": step.get("ok", False),
+            "role": role,
+            "task": task,
+            "plan_id": plan.plan_id,
+            "branch": str(raw_run.get("branch_name", "")),
+            "output": step.get("output", ""),
+            "toolset": sorted(_SUBAGENT_TOOLSETS.get(role, set())),
+        }
+
+    def _reconstruct_run_for_dispatch(raw_run: dict[str, object], executor: WorktreeExecutor) -> Any:
+        from hermes_lite.coding.worktree_exec import WorktreeRun, WorktreeTask
+        run = WorktreeRun(
+            run_id=str(raw_run["run_id"]),
+            worktree_path=executor.worktree_base / str(raw_run["branch_name"]).replace("/", "-"),
+            branch_name=str(raw_run["branch_name"]),
+            status=str(raw_run.get("status", "created")),
+        )
+        for task_data in raw_run.get("tasks", []):
+            if isinstance(task_data, dict):
+                run.tasks.append(WorktreeTask(
+                    task_id=str(task_data.get("task_id", "")),
+                    role=str(task_data.get("role", "")),
+                    description=str(task_data.get("description", "")),
+                    status=str(task_data.get("status", "pending")),
+                ))
+        return run
 
     def as_json(func: Callable[..., dict[str, object]]) -> Callable[..., str]:
         def wrapper(**kwargs: Any) -> str:
@@ -164,11 +305,36 @@ def register_coding_tools(
     def write_file(path: str, content: str) -> dict[str, object]:
         check = workspace.resolve(path, operation="write")
         decision = policy.decide_write(check)
-        if not decision.allowed:
+        if decision.denied:
             result = decision.to_dict()
             result.update({"ok": False, "error": "permission_denied", "reason": decision.reason})
             return result
-        return workspace.write_text(path, content)
+        if decision.requires_approval:
+            current = workspace.read_text(path)
+            old_content = current.get("content", "") if current.get("ok") else ""
+            preview = ""
+            if old_content:
+                preview = f"--- a/{path}\n+++ b/{path}\n@@ -1,{len(old_content.splitlines())} +1,{len(content.splitlines())} @@\n"
+                for line in old_content.splitlines():
+                    preview += f"-{line}\n"
+                for line in content.splitlines():
+                    preview += f"+{line}\n"
+            else:
+                preview = f"New file: {path}\n+{content[:500]}"
+            decision.edit_preview = f"Write preview for {path}:\n{preview}"
+            if not policy.confirm(decision):
+                return {"ok": False, "error": "edit_rejected",
+                        "message": f"Write to {path} was not confirmed."}
+        result = workspace.write_text(path, content)
+        if result.get("ok"):
+            try:
+                from hermes_lite.coding.extensibility import run_post_edit_hooks
+                hooks_result = run_post_edit_hooks(workspace, path)
+                if hooks_result.get("ran", 0) > 0:
+                    result["post_edit_hooks"] = hooks_result
+            except Exception:
+                pass
+        return result
 
     registry.register(
         name="workspace_status",
@@ -241,12 +407,8 @@ def register_coding_tools(
             "required": ["path", "old_text", "new_text"],
         },
         handler=as_json(
-            lambda path, old_text, new_text, replace_all=False: apply_text_patch(
-                workspace,
-                path,
-                old_text,
-                new_text,
-                replace_all=replace_all,
+            lambda path, old_text, new_text, replace_all=False: _apply_patch_with_confirm(
+                workspace, policy, path, old_text, new_text, replace_all=replace_all,
             )
         ),
         toolset="coding",
@@ -264,8 +426,8 @@ def register_coding_tools(
             "required": ["path", "diff_text"],
         },
         handler=as_json(
-            lambda path, diff_text, dry_run=False, fuzzy=0: apply_unified_diff(
-                workspace, path, diff_text, dry_run=dry_run, fuzzy=fuzzy,
+            lambda path, diff_text, dry_run=False, fuzzy=0: _apply_unified_diff_with_confirm(
+                workspace, policy, path, diff_text, dry_run=dry_run, fuzzy=fuzzy,
             )
         ),
         toolset="coding",
@@ -726,6 +888,21 @@ def register_coding_tools(
         toolset="coding",
         parallel_safe=True,
     )
+    registry.register(
+        name="subagent_dispatch",
+        schema={
+            "description": "Dispatch a task to a sub-agent in an isolated worktree. Role: planner (inspect + plan), builder (implement), or reviewer (review diff).",
+            "properties": {
+                "role": {"type": "string", "description": "Sub-agent role: planner, builder, or reviewer."},
+                "task": {"type": "string", "description": "Task description for the sub-agent."},
+            },
+            "required": ["role", "task"],
+        },
+        handler=as_json(
+            lambda role, task: _dispatch_sync(role, task, workspace, policy, wt_exec)
+        ),
+        toolset="coding",
+    )
 
     # -- test runner tools ------------------------------------------------
 
@@ -755,6 +932,21 @@ def register_coding_tools(
                 workspace, path=path, extra_args=extra_args,
             )
         ),
+        toolset="coding",
+    )
+    registry.register(
+        name="debug_error",
+        schema={
+            "description": "Parse a traceback and return source context around each error frame.",
+            "properties": {
+                "traceback_text": {"type": "string", "description": "Raw traceback string."},
+                "context_lines": {"type": "integer", "description": "Lines of context around each frame (default 5)."},
+            },
+            "required": ["traceback_text"],
+        },
+        handler=as_json(lambda traceback_text, context_lines=5: debug_error(
+            workspace, traceback_text, context_lines=context_lines,
+        )),
         toolset="coding",
     )
 
@@ -809,6 +1001,21 @@ def register_coding_tools(
             "required": ["url"],
         },
         handler=as_json(lambda url, max_chars=8000: web_fetch(url, max_chars=max_chars)),
+        toolset="coding",
+    )
+    registry.register(
+        name="semantic_search",
+        schema={
+            "description": "Semantically search workspace code files for a natural-language query.",
+            "properties": {
+                "query": {"type": "string", "description": "Natural-language search query."},
+                "top_k": {"type": "integer", "description": "Maximum results (default 10)."},
+            },
+            "required": ["query"],
+        },
+        handler=as_json(lambda query, top_k=10: semantic_search(
+            str(workspace.root), query, top_k=top_k,
+        )),
         toolset="coding",
     )
 
@@ -951,6 +1158,38 @@ def register_coding_tools(
             "required": [],
         },
         handler=as_json(lambda: list_plans(str(workspace.root))),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
+    # -- scaffold tools -----------------------------------------------------
+
+    registry.register(
+        name="scaffold_project",
+        schema={
+            "description": "Generate a standard project structure from a built-in template.",
+            "properties": {
+                "template": {
+                    "type": "string",
+                    "description": "Template name: python-app, python-lib, or node-app.",
+                },
+                "project_name": {"type": "string", "description": "Optional custom project name."},
+            },
+            "required": ["template"],
+        },
+        handler=as_json(lambda template, project_name="": scaffold_project(
+            str(workspace.root), template, project_name=project_name,
+        )),
+        toolset="coding",
+    )
+    registry.register(
+        name="scaffold_list_templates",
+        schema={
+            "description": "List available scaffold templates.",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(scaffold_list_templates),
         toolset="coding",
         parallel_safe=True,
     )

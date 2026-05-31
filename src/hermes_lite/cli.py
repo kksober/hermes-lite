@@ -21,7 +21,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from hermes_lite.agent import HermesAgent
+from hermes_lite.agent import HermesAgent, _model_messages_to_dicts
 from hermes_lite.coding.audit import AuditLogger
 from hermes_lite.coding.context import build_project_map
 from hermes_lite.coding.git import GitClient
@@ -248,6 +248,7 @@ async def _handle_dot_command(
                 print("  /context         Show workspace context (branch, rules, changes)")
                 print("  /todo [text]     List or create todo items")
                 print("  /usage           Show token usage for this session")
+                print("  /clear           Clear conversation history")
                 print("  /notify [msg]    Send a desktop notification")
                 print("  /run             Resume agent execution stub")
                 print("  /resume <id>     Resume a command session")
@@ -451,11 +452,59 @@ async def _handle_dot_command(
             return True
 
         case "usage":
-            print(f"  Prompt tokens:     {agent._total_prompt_tokens:,}")
-            print(f"  Completion tokens: {agent._total_completion_tokens:,}")
-            total = agent._total_prompt_tokens + agent._total_completion_tokens
-            print(f"  Total tokens:      {total:,}")
-            print(f"  LLM calls:         {agent._call_count}")
+            usage_info = agent.usage
+            print(f"  Model:             {usage_info.get('model', 'unknown')}")
+            print(f"  Prompt tokens:     {usage_info['prompt_tokens']:,}")
+            print(f"  Completion tokens: {usage_info['completion_tokens']:,}")
+            print(f"  Total tokens:      {usage_info['total_tokens']:,}")
+            print(f"  LLM calls:         {usage_info['call_count']}")
+            cost_usd = usage_info.get("cost_usd", 0.0)
+            print(f"  Estimated cost:    ${cost_usd:.4f}")
+            if hasattr(agent, "context_window"):
+                cw = agent.context_window
+                ratio = cw.usage_ratio(
+                    _model_messages_to_dicts(agent.last_messages)
+                ) if agent.last_messages else 0.0
+                print(f"  Context usage:     {ratio:.0%} of {cw.max_tokens:,}")
+                print(f"  Compressions:      {cw.compress_count}")
+            return True
+
+        case "cd":
+            path = args.strip()
+            if not path:
+                print("Usage: /cd <workspace-path>")
+                return True
+            from pathlib import Path
+            from hermes_lite.coding.workspace import Workspace
+            new_root = Path(path).resolve()
+            if not new_root.is_dir():
+                print(f"  Not a directory: {path}")
+                return True
+            if workspace_runtime is not None:
+                workspace_runtime.workspace = Workspace(new_root)
+                print(f"  Workspace changed to: {new_root}")
+            return True
+
+        case "ref":
+            path = args.strip()
+            if not path:
+                print("Usage: /ref <project-path>  (read-only reference)")
+                return True
+            from pathlib import Path
+            ref_root = Path(path).resolve()
+            if not ref_root.is_dir():
+                print(f"  Not a directory: {path}")
+                return True
+            if workspace_runtime is not None:
+                if not hasattr(workspace_runtime, "_refs"):
+                    workspace_runtime._refs = []
+                workspace_runtime._refs.append(str(ref_root))
+                print(f"  Added readonly reference: {ref_root}")
+            return True
+
+        case "clear":
+            result = agent.clear_context()
+            print(f"  {result['message']}")
             return True
 
         case "notify":
@@ -470,10 +519,28 @@ async def _handle_dot_command(
 
         case "resume":
             sid = args.strip()
-            if not sid:
-                print("Usage: /resume <session-id>")
+            if workspace_runtime is None:
+                print("No workspace configured.")
                 return True
-            print(f"(resume session {sid} not yet implemented)")
+            from hermes_lite.coding.conversation_store import load_conversation, list_conversations
+            if not sid:
+                result = list_conversations(str(workspace_runtime.workspace.root))
+                sessions = result.get("sessions", [])
+                if not sessions:
+                    print("No saved conversations.")
+                else:
+                    print("Recent conversations:")
+                    for s in sessions[:10]:
+                        print(f"  {s['session_id']}  ({s['message_count']} msgs, {s['saved_at'][:19]})")
+                    print()
+                    print("Use /resume <session-id> to restore one.")
+                return True
+            result = load_conversation(str(workspace_runtime.workspace.root), sid)
+            if not result["ok"]:
+                print(f"  {result.get('message', 'Failed')}")
+                return True
+            agent.set_message_history(result["messages"])
+            print(f"  Restored session {sid} ({result['message_count']} messages).")
             return True
 
         case "lsp":
@@ -709,15 +776,63 @@ async def run_repl(
                 return
             continue
 
-        # Send to agent
+        # Send to agent with streaming
         print()  # blank line before response
         try:
-            response, message_history = await agent.run(
+            from hermes_lite.coding.terminal import gray, spinner_chars
+
+            # Inject per-turn context into user message
+            if workspace_runtime is not None:
+                from hermes_lite.coding.context_inject import per_turn_context
+                ctx = per_turn_context(workspace_runtime.workspace.root)
+                if ctx:
+                    user_input = f"{ctx}\n\n<user_query>\n{user_input}\n</user_query>"
+
+            # Check for pending resume messages
+            if agent._pending_resume_messages is not None:
+                message_history = agent._pending_resume_messages
+                agent._pending_resume_messages = None
+
+            first_token = True
+            spinner_idx = 0
+            sys.stdout.write("\033[?25l")  # hide cursor
+            sys.stdout.flush()
+
+            async for chunk in agent.run_stream(
                 user_input, message_history=message_history
-            )
-            print(response)
+            ):
+                if first_token:
+                    first_token = False
+                    # Clear spinner line
+                    sys.stdout.write("\r\033[K")
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+
+            # After streaming completes
+            message_history = agent.last_messages
+
+            # Auto-save conversation to .hermes/conversations/
+            if workspace_runtime is not None and message_history:
+                try:
+                    from hermes_lite.coding.conversation_store import save_conversation
+                    from hermes_lite.agent import _model_messages_to_dicts
+                    msg_dicts = _model_messages_to_dicts(message_history)
+                    save_conversation(
+                        str(workspace_runtime.workspace.root),
+                        msg_dicts,
+                        metadata={"auto_saved": True},
+                    )
+                except Exception:
+                    pass  # save failures are non-fatal
+
+            sys.stdout.write("\033[?25h")  # show cursor
+            sys.stdout.flush()
+            print()
         except Exception as exc:
-            print(f"[ERROR] {exc}")
+            sys.stdout.write("\033[?25h")  # restore cursor
+            sys.stdout.flush()
+            from hermes_lite.coding.terminal import error_box
+            print(f"\n  {error_box(str(exc))}")
         print()  # blank line after response
 
 
@@ -749,7 +864,11 @@ def main() -> None:
     def _confirm_permission(decision: PermissionDecision) -> bool:
         print(f"\n  [PERMISSION] {decision.operation}: {decision.target}")
         print(f"  Reason: {decision.reason}")
-        if decision.message:
+        if decision.edit_preview:
+            from hermes_lite.coding.terminal import color_diff
+            preview = color_diff(decision.edit_preview)
+            print(f"\n{preview}")
+        elif decision.message:
             print(f"  {decision.message}")
         try:
             answer = input("  Approve? [y/N] ").strip().lower()
@@ -810,6 +929,12 @@ def main() -> None:
         if plan_count:
             draft = sum(1 for p in plans.get("plans", []) if p.get("status") == "draft")
             print(f"[plan] {plan_count} saved ({draft} draft)")
+        from hermes_lite.coding.conversation_store import list_conversations
+        convs = list_conversations(str(workspace_runtime.workspace.root))
+        conv_count = len(convs.get("sessions", []))
+        if conv_count:
+            latest = convs["sessions"][0]
+            print(f"[sessions] {conv_count} saved conversations (latest: {latest['session_id']})")
 
     # 7. Run the REPL
     try:
