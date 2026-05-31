@@ -38,34 +38,45 @@ def diagnose_python(workspace: Workspace, path: str = ".") -> dict[str, object]:
 
 
 def extract_python_symbols(workspace: Workspace, path: str) -> dict[str, object]:
-    """Extract classes and functions from a Python file."""
-    read_result = workspace.read_text(path)
-    if not read_result["ok"]:
-        return read_result
-    try:
-        tree = ast.parse(str(read_result["content"]), filename=path)
-    except SyntaxError as exc:
+    """Extract classes, functions, methods, and imports from a Python file.
+
+    Delegates to ``ast_analysis.extract_symbols`` for deep extraction,
+    returning a superset of the original flat symbol list.
+    """
+    from hermes_lite.coding.ast_analysis import extract_symbols as _extract
+
+    result = _extract(workspace, path)
+    if not result.get("ok"):
         return {
             "ok": False,
-            "error": "syntax_error",
-            "diagnostics": [{
-                "path": path,
-                "line": exc.lineno or 0,
-                "column": exc.offset or 0,
-                "severity": "error",
-                "message": exc.msg,
-            }],
+            "error": result.get("error", "unknown"),
+            "diagnostics": [result.get("message", "")],
             "symbols": [],
         }
 
+    # Build the flat symbol list for backward compatibility
     symbols: list[dict[str, object]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            symbols.append({"name": node.name, "kind": "class", "line": node.lineno})
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            symbols.append({"name": node.name, "kind": "function", "line": node.lineno})
-    symbols.sort(key=lambda item: (int(item["line"]), str(item["name"])))
-    return {"ok": True, "path": path, "symbols": symbols}
+    for sym in result.get("symbols", []):
+        symbols.append({
+            "name": sym["name"],
+            "kind": sym.get("kind", "function"),
+            "line": sym.get("lineno", 0),
+        })
+        for m in sym.get("methods", []):
+            symbols.append({
+                "name": f"{sym['name']}.{m['name']}",
+                "kind": "method",
+                "line": m.get("lineno", 0),
+            })
+
+    symbols.sort(key=lambda item: (int(item.get("line", 0)), str(item.get("name", ""))))
+    return {
+        "ok": True,
+        "path": path,
+        "symbols": symbols,
+        "imports": result.get("imports", []),
+        "assignments": result.get("assignments", []),
+    }
 
 
 def _python_targets(workspace: Workspace, path: str) -> list[str]:

@@ -15,6 +15,7 @@ from hermes_lite.coding.context import (
     search_text,
 )
 from hermes_lite.coding.diagnostics import diagnose_python, extract_python_symbols
+from hermes_lite.coding.ast_analysis import build_call_graph, extract_symbols, find_references
 from hermes_lite.coding.extensibility import hook_status, load_external_tools, load_mcp_servers, run_hooks
 from hermes_lite.coding.multimodal import read_image, read_image_supported
 from hermes_lite.coding.notebook import (
@@ -629,6 +630,64 @@ def register_coding_tools(
         toolset="coding",
         parallel_safe=True,
     )
+
+    # -- code_structure (deep AST analysis) --------------------------------
+
+    # Note: extract_symbols and extract_python_symbols are both available.
+    # extract_symbols returns richer output (methods, imports, annotations).
+
+    registry.register(
+        name="code_structure",
+        schema={
+            "description": "Extract structured symbols from a Python file: classes with methods, functions with args/return types, imports, assignments.",
+            "properties": {
+                "path": {"type": "string", "description": "File path relative to workspace."},
+            },
+            "required": ["path"],
+        },
+        handler=as_json(lambda path: extract_symbols(workspace, path)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
+    # -- call_graph -------------------------------------------------------
+
+    registry.register(
+        name="call_graph",
+        schema={
+            "description": "Build a cross-file call graph for Python code showing which functions call which.",
+            "properties": {
+                "file_patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Glob patterns for files to include (default: ['**/*.py']).",
+                },
+            },
+            "required": [],
+        },
+        handler=as_json(lambda file_patterns=None: build_call_graph(
+            workspace, file_patterns=file_patterns,
+        )),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
+    # -- find_symbol ------------------------------------------------------
+
+    registry.register(
+        name="find_symbol",
+        schema={
+            "description": "Find where a symbol is defined, referenced textually, and how it's called.",
+            "properties": {
+                "name": {"type": "string", "description": "Unqualified symbol name (e.g. 'authenticate')."},
+            },
+            "required": ["name"],
+        },
+        handler=as_json(lambda name: find_references(workspace, name)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+
     registry.register(
         name="external_tools",
         schema={"description": "List configured external tools.", "properties": {}, "required": []},

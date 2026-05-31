@@ -123,4 +123,4 @@ def test_python_diagnostics_and_symbols(tmp_path) -> None:
     assert diagnostics["ok"] is False
     assert diagnostics["diagnostics"][0]["severity"] == "error"
     assert {"name": "Thing", "kind": "class", "line": 1} in symbols["symbols"]
-    assert {"name": "method", "kind": "function", "line": 2} in symbols["symbols"]
+    assert {"name": "Thing.method", "kind": "method", "line": 2} in symbols["symbols"]

@@ -327,7 +327,36 @@ def build_project_map(
     if token_budget is not None:
         result = _trim_to_token_budget(result, token_budget)
 
+    # Lightweight symbol counting for Python important files
+    _enrich_symbol_counts(workspace, result, important_files)
+
     return result
+
+
+def _enrich_symbol_counts(
+    workspace: Workspace, result: dict[str, object], important_files: list[str],
+) -> None:
+    """Add per-file symbol counts to project map (Python only, lightweight)."""
+    import ast
+
+    symbol_counts: dict[str, int] = {}
+    for rel in important_files:
+        if not rel.endswith(".py"):
+            continue
+        try:
+            r = workspace.read_text(rel)
+            if not r.get("ok"):
+                continue
+            tree = ast.parse(str(r["content"]), filename=rel)
+            count = 0
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    count += 1
+            symbol_counts[rel] = count
+        except (SyntaxError, Exception):
+            continue
+    if symbol_counts:
+        result["symbol_counts"] = symbol_counts
 
 
 def rank_files(

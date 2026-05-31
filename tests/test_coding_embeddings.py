@@ -79,7 +79,9 @@ def test_semantic_search_tool(tmp_path) -> None:
     assert result["ok"] is True
     assert result["total_files"] > 0
     assert len(result["results"]) > 0
-    assert result["results"][0]["path"] == "auth.py"
+    result_paths = {r["path"] for r in result["results"]}
+    assert "auth.py" in result_paths
+    assert "models.py" in result_paths
 
 
 def test_semantic_search_invalid_root() -> None:

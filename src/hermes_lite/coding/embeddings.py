@@ -63,14 +63,18 @@ class SemanticIndex:
     # indexing
     # ------------------------------------------------------------------
 
-    def index_files(self, files: dict[str, str]) -> None:
-        """Index a mapping of ``{file_path: content}``."""
+    def index_files(self, files: dict[str, str], *, symbols_per_file: dict[str, list[str]] | None = None) -> None:
+        """Index a mapping of ``{file_path: content}``.
+
+        If *symbols_per_file* is provided, symbol tokens are weighted 2x in
+        the TF-IDF vectors, making symbol-aware searches more accurate.
+        """
         self._docs = dict(files)
         if self.backend == "text":
-            self._build_tfidf_index(files)
+            self._build_tfidf_index(files, symbols_per_file=symbols_per_file)
 
-    def _build_tfidf_index(self, files: dict[str, str]) -> None:
-        """Compute TF-IDF vectors for every document."""
+    def _build_tfidf_index(self, files: dict[str, str], *, symbols_per_file: dict[str, list[str]] | None = None) -> None:
+        """Compute TF-IDF vectors, optionally weighting symbols 2x."""
         N = len(files)
         if N == 0:
             self._idf = {}
@@ -80,8 +84,15 @@ class SemanticIndex:
         df: dict[str, int] = {}
         doc_tokens: dict[str, list[str]] = {}
 
+        sym_map = symbols_per_file or {}
+
         for path, content in files.items():
             tokens = _tokenize(content)
+            # Weight symbol names 2x by appending them again
+            extra = sym_map.get(path, [])
+            for name in extra:
+                st = _tokenize(name)
+                tokens.extend(st)
             doc_tokens[path] = tokens
             for term in set(tokens):
                 df[term] = df.get(term, 0) + 1
@@ -188,12 +199,34 @@ def _get_index() -> SemanticIndex:
     return _index
 
 
+def _extract_symbol_names(root: Path, files: dict[str, str]) -> dict[str, list[str]]:
+    """Extract symbol names from Python files for weighted TF-IDF indexing."""
+    import ast
+
+    symbols_per_file: dict[str, list[str]] = {}
+    for rp, content in files.items():
+        if not rp.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            continue
+        names: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.append(node.name)
+        if names:
+            symbols_per_file[rp] = names
+    return symbols_per_file
+
+
 def semantic_search(
     workspace_root: str,
     query: str,
     top_k: int = 10,
     *,
     file_patterns: list[str] | None = None,
+    symbol_aware: bool = True,
 ) -> dict[str, Any]:
     """Search workspace files semantically and return ranked results.
 
@@ -208,6 +241,8 @@ def semantic_search(
     file_patterns:
         Optional list of glob patterns to restrict the file set
         (default: ``["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.md"]``).
+    symbol_aware:
+        When True (default), Python symbol names get 2x TF-IDF weight.
     """
     if file_patterns is None:
         file_patterns = ["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.md",
@@ -234,14 +269,16 @@ def semantic_search(
             except (OSError, UnicodeDecodeError):
                 continue
 
+    symbols = _extract_symbol_names(root, files) if symbol_aware else None
     index = _get_index()
-    index.index_files(files)
+    index.index_files(files, symbols_per_file=symbols)
     results = index.search(query, top_k=top_k)
 
     return {
         "ok": True,
         "query": query,
         "total_files": len(files),
+        "symbol_weighted": symbols is not None and len(symbols) > 0,
         "results": results,
         "backend": index.backend,
     }
@@ -251,6 +288,7 @@ def build_semantic_index(
     workspace_root: str,
     *,
     file_patterns: list[str] | None = None,
+    symbol_aware: bool = True,
 ) -> dict[str, Any]:
     """Pre-build the semantic index for *workspace_root*.
 
@@ -277,7 +315,8 @@ def build_semantic_index(
             except (OSError, UnicodeDecodeError):
                 continue
 
+    symbols = _extract_symbol_names(root, files) if symbol_aware else None
     index = _get_index()
-    index.index_files(files)
+    index.index_files(files, symbols_per_file=symbols)
 
-    return {"ok": True, "indexed_files": len(files), "backend": index.backend}
+    return {"ok": True, "indexed_files": len(files), "symbol_weighted": symbols is not None and len(symbols) > 0, "backend": index.backend}
