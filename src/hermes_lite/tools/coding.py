@@ -41,6 +41,7 @@ from hermes_lite.coding.subagents import (
     execute_subagent_plan,
     subagent_execute_with_commands,
 )
+from hermes_lite.coding.testing import discover_tests, extract_failure_locations, run_tests
 from hermes_lite.coding.worktree_exec import WorktreeExecutor
 from hermes_lite.coding.workspace import Workspace
 from hermes_lite.tools.registry import ToolRegistry
@@ -644,5 +645,35 @@ def register_coding_tools(
             "required": [],
         },
         handler=as_json(lambda: git.worktree_status()),
+        toolset="coding",
+    )
+
+    # -- test runner tools ------------------------------------------------
+
+    registry.register(
+        name="discover_tests",
+        schema={
+            "description": "Find test files in the workspace (tests/ or test/ directories).",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: {"ok": True, "test_files": discover_tests(workspace)}),
+        toolset="coding",
+    )
+    registry.register(
+        name="run_tests",
+        schema={
+            "description": "Run tests using .venv python if available. Returns structured pass/fail/error details with file:line locations for failures.",
+            "properties": {
+                "path": {"type": "string", "description": "Optional sub-path or test file to restrict execution."},
+                "extra_args": {"type": "array", "items": {"type": "string"}, "description": "Extra pytest arguments, e.g. ['-x', '--tb=long']."},
+            },
+            "required": [],
+        },
+        handler=as_json(
+            lambda path="", extra_args=None: run_tests(
+                workspace, path=path, extra_args=extra_args,
+            )
+        ),
         toolset="coding",
     )

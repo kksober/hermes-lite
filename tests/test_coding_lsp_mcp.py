@@ -199,5 +199,6 @@ def test_new_tools_registered(tmp_path) -> None:
         "lsp_references", "lsp_hover",
         "mcp_status", "mcp_connect", "mcp_list_tools", "mcp_call_tool",
         "subagent_execute",
+        "discover_tests", "run_tests",
     }
     assert expected_new <= names

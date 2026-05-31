@@ -220,6 +220,7 @@ async def _handle_dot_command(
                 print("  /audit           Show audit log summary")
                 print("  /sessions        List background command sessions")
                 print("  /recent [n]      Show recently changed files")
+                print("  /test [path]     Run tests with .venv python, structured results")
                 print("  /testfor <path>  Find test files for a source file")
                 print("  /repomap         Token-aware repository overview")
                 print("  /projectmap      Show project structure summary")
@@ -453,6 +454,44 @@ async def _handle_dot_command(
                         print(f"  [{tf['score']}] {tf['path']} ({tf.get('language', '?')})")
                 else:
                     print("  (no test files found)")
+            return True
+
+        case "test":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            from hermes_lite.coding.testing import run_tests, discover_tests
+            extra = args.strip().split() if args.strip() else []
+            path = extra[0] if extra and not extra[0].startswith("-") else ""
+            extra_args = extra if not path else extra[1:]
+
+            print(f"Running tests{' in ' + path if path else ''}...")
+            result = run_tests(workspace_runtime.workspace, path=path, extra_args=extra_args if extra_args else None)
+
+            if not result.get("ran"):
+                print(f"  Error: {result.get('message', 'tests could not be run')}")
+                if "python_used" in result:
+                    print(f"  Python: {result['python_used']}")
+                return True
+
+            print(f"  Runner: {result.get('runner', '?')}")
+            print(f"  Python: {result.get('python_used', '?')}")
+            print(f"  Passed: {result.get('passed', 0)}  Failed: {result.get('failed', 0)}  Errors: {result.get('errors', 0)}")
+            if result.get("skipped"):
+                print(f"  Skipped: {result['skipped']}")
+
+            failures = result.get("failures", [])
+            if failures:
+                print(f"\n  --- {len(failures)} failure(s) ---")
+                for f in failures:
+                    print(f"  [{f.get('failure_type', '?')}] {f.get('test_name', '?')}")
+                    if f.get("file") and f.get("line"):
+                        print(f"    {f['file']}:{f['line']}")
+                    msg = f.get("message", "")
+                    if msg:
+                        print(f"    {msg[:200]}")
+            elif result.get("ok"):
+                print("  All tests passed.")
             return True
 
         case "repomap":
