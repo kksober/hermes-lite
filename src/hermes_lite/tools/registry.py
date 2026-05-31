@@ -40,6 +40,8 @@ class ToolRegistry:
         handler: Callable[..., Any],
         toolset: str = "default",
         requires: Callable[[], bool] | None = None,
+        *,
+        parallel_safe: bool = False,
     ) -> None:
         """Register a tool.
 
@@ -49,6 +51,8 @@ class ToolRegistry:
             handler: Async or sync callable that executes the tool.
             toolset: Logical group for filtering (default, terminal, file, etc.).
             requires: Optional callable returning True if the tool's prerequisites are met.
+            parallel_safe: If True, this tool can be called in parallel with other
+                parallel_safe tools (e.g. read-only operations).
         """
         self._tools[name] = {
             "name": name,
@@ -56,6 +60,7 @@ class ToolRegistry:
             "handler": handler,
             "toolset": toolset,
             "requires": requires,
+            "parallel_safe": parallel_safe,
         }
 
     def get_schemas(self, enabled_toolsets: set[str] | None = None) -> list[dict[str, Any]]:
@@ -126,7 +131,7 @@ class ToolRegistry:
             List of dicts with 'name' and 'toolset' keys.
         """
         return [
-            {"name": e["name"], "toolset": e["toolset"]}
+            {"name": e["name"], "toolset": e["toolset"], "parallel_safe": e.get("parallel_safe", False)}
             for e in self._tools.values()
         ]
 

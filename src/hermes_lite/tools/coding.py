@@ -115,6 +115,7 @@ def register_coding_tools(
         schema={"description": "Return workspace, permissions, and git status.", "properties": {}, "required": []},
         handler=as_json(lambda: workspace_status()),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="list_files",
@@ -261,6 +262,7 @@ def register_coding_tools(
         schema={"description": "Return git short status.", "properties": {}, "required": []},
         handler=as_json(lambda: git.status()),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="git_diff",
@@ -271,6 +273,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda path="", stat=False: git.diff(path=path, stat=stat)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="project_map",
@@ -281,6 +284,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda limit=2000: build_project_map(workspace, limit=limit)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="rank_files",
@@ -291,6 +295,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda query, limit=20: rank_files(workspace, query, limit=limit)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="recent_changes",
@@ -301,6 +306,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda count=20: recent_changes(workspace, count=count)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="find_test_files",
@@ -311,6 +317,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda source_path: find_test_files(workspace, source_path)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="repo_map",
@@ -338,6 +345,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda path=".": diagnose_python(workspace, path)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="python_symbols",
@@ -348,24 +356,28 @@ def register_coding_tools(
         },
         handler=as_json(lambda path: extract_python_symbols(workspace, path)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="external_tools",
         schema={"description": "List configured external tools.", "properties": {}, "required": []},
         handler=as_json(lambda: load_external_tools(workspace)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="mcp_servers",
         schema={"description": "List configured MCP servers.", "properties": {}, "required": []},
         handler=as_json(lambda: load_mcp_servers(workspace)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="hook_status",
         schema={"description": "List configured hooks without running them.", "properties": {}, "required": []},
         handler=as_json(lambda: hook_status(workspace)),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="subagent_plan",
@@ -376,12 +388,14 @@ def register_coding_tools(
         },
         handler=as_json(lambda task: create_subagent_plan(task).to_dict()),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="worktree_status",
         schema={"description": "Inspect git worktree status.", "properties": {}, "required": []},
         handler=as_json(lambda: git.worktree_status()),
         toolset="coding",
+        parallel_safe=True,
     )
 
     # -- long-running command sessions ----------------------------------
@@ -462,6 +476,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda: sessions.list_sessions()),
         toolset="coding",
+        parallel_safe=True,
     )
 
     # -- LSP tools --------------------------------------------------------
@@ -471,6 +486,7 @@ def register_coding_tools(
         schema={"description": "Check which LSP servers are available.", "properties": {}, "required": []},
         handler=as_json(lambda: lsp_status()),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="lsp_diagnostics",
@@ -571,6 +587,7 @@ def register_coding_tools(
         schema={"description": "Show MCP server connection status.", "properties": {}, "required": []},
         handler=as_json(lambda: mcp.status()),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="mcp_connect",
@@ -591,6 +608,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda: mcp.list_all_tools()),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="mcp_call_tool",
@@ -646,6 +664,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda: git.worktree_status()),
         toolset="coding",
+        parallel_safe=True,
     )
 
     # -- test runner tools ------------------------------------------------
@@ -659,6 +678,7 @@ def register_coding_tools(
         },
         handler=as_json(lambda: {"ok": True, "test_files": discover_tests(workspace)}),
         toolset="coding",
+        parallel_safe=True,
     )
     registry.register(
         name="run_tests",

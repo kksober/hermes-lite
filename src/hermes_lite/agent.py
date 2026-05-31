@@ -3,11 +3,16 @@
 The HermesAgent orchestrates: building system prompts, calling the LLM,
 dispatching tool calls, injecting memory, and looping until the model
 produces a final text response.
+
+Supports parallel tool calls — when the LLM returns multiple independent
+tool calls in a single turn, they are dispatched together.  Read-only tools
+are marked ``parallel_safe`` so the model is encouraged to batch them.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, AsyncGenerator, Literal
 
@@ -29,6 +34,92 @@ from hermes_lite.skills.manager import SkillManager
 from hermes_lite.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# error classification
+# ---------------------------------------------------------------------------
+
+_ERROR_PATTERNS: dict[str, tuple[bool, str]] = {
+    "permission_denied": (False, "Permission denied — you cannot perform this operation."),
+    "not_found": (True, "Resource not found — check the path or name, then retry."),
+    "execution_error": (True, "Command execution error — review the command and retry."),
+    "timeout": (True, "Operation timed out — try a smaller scope or increase timeout."),
+    "invalid_task_index": (False, "Invalid worktree task index."),
+    "not_git_repo": (False, "Not a git repository — git operations unavailable."),
+    "pytest_not_found": (True, "pytest is not installed — install it or use the .venv python."),
+    "test_failure": (False, "Some tests failed — review failures and fix the code."),
+}
+
+
+def classify_tool_error(result_str: str) -> dict[str, Any]:
+    """Classify a tool error response and return actionable metadata.
+
+    Parameters
+    ----------
+    result_str:
+        The JSON string or plain text returned by a tool.
+
+    Returns
+    -------
+    Dict with ``category``, ``retryable``, and ``hint`` keys.
+    """
+    category = "unknown"
+    retryable = True
+    hint = ""
+
+    # Try to parse as JSON
+    try:
+        data = json.loads(result_str)
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+
+    if isinstance(data, dict):
+        ok = data.get("ok", True)
+        if ok is True:
+            return {"category": "ok", "retryable": False, "hint": ""}
+
+        error_key = str(data.get("error", "")).lower()
+        # Check for test failures (ok=False but has test metrics)
+        if "total" in data and ("passed" in data or "failed" in data):
+            failed_count = data.get("failed", 0)
+            error_count = data.get("errors", 0)
+            return {
+                "category": "test_failure",
+                "retryable": False,
+                "hint": f"{failed_count} failed, {error_count} errors — review the failures list for details.",
+            }
+
+        # Match error key against known patterns
+        for pattern_key, (retry, hint_msg) in _ERROR_PATTERNS.items():
+            if pattern_key in error_key or pattern_key in result_str.lower():
+                return {"category": pattern_key, "retryable": retry, "hint": hint_msg}
+
+        # Check if error message suggests a workaround
+        if error_key:
+            return {"category": error_key, "retryable": True, "hint": str(data.get("message", ""))}
+
+    # Plain text error
+    result_lower = result_str.lower()
+    for pattern_key, (retry, hint_msg) in _ERROR_PATTERNS.items():
+        if pattern_key in result_lower:
+            return {"category": pattern_key, "retryable": retry, "hint": hint_msg}
+
+    return {"category": "unknown", "retryable": True, "hint": hint}
+
+
+def build_parallel_hint(registry: ToolRegistry) -> str:
+    """Generate a system prompt hint listing tools safe for parallel calls."""
+    parallel_tools = [
+        name for name, entry in registry._tools.items()
+        if entry.get("parallel_safe", False)
+    ]
+    if not parallel_tools:
+        return ""
+    names = ", ".join(sorted(parallel_tools))
+    return (
+        f"\nYou may call multiple independent read-only tools in a single response "
+        f"for efficiency. These tools are safe to batch: {names}.\n"
+    )
 
 
 class HermesAgent:
@@ -102,15 +193,24 @@ class HermesAgent:
         """
         return self._last_messages
 
-    def _log_tool_failures(self, response_parts: list) -> None:
-        """Log any tool failures found in the response parts."""
+    def _log_tool_failures(self, response_parts: list) -> int:
+        """Log tool failures and return the count of failed tools."""
+        failed_count = 0
         for msg in response_parts:
             for part in msg.parts:
                 if isinstance(part, ToolReturnPart):
                     content = str(part.content) if part.content else ""
-                    if "error" in content.lower() or "failed" in content.lower():
+                    classification = classify_tool_error(content)
+                    if classification["category"] != "ok":
+                        failed_count += 1
                         tool_name = getattr(part, "tool_name", "unknown")
-                        logger.warning("tool_failed tool=%s error=%s", tool_name, content[:200])
+                        logger.warning(
+                            "tool_failed tool=%s category=%s retryable=%s hint=%s",
+                            tool_name, classification["category"],
+                            classification["retryable"],
+                            classification["hint"][:120],
+                        )
+        return failed_count
 
     async def _call_with_retry(
         self,
@@ -223,8 +323,14 @@ class HermesAgent:
         if tools_list:
             parts.append("\n<available_tools>")
             for t in tools_list:
-                parts.append(f"- {t['name']} [{t['toolset']}]")
+                parallel_mark = " [parallel_safe]" if t.get("parallel_safe") else ""
+                parts.append(f"- {t['name']} [{t['toolset']}]{parallel_mark}")
             parts.append("</available_tools>")
+
+        # Add parallel tool call hint
+        parallel_hint = build_parallel_hint(self._tool_registry)
+        if parallel_hint:
+            parts.append(parallel_hint)
 
         return "\n".join(parts)
 
