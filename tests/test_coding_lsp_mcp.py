@@ -200,5 +200,6 @@ def test_new_tools_registered(tmp_path) -> None:
         "mcp_status", "mcp_connect", "mcp_list_tools", "mcp_call_tool",
         "subagent_execute",
         "discover_tests", "run_tests",
+        "read_rules", "workspace_context",
     }
     assert expected_new <= names

@@ -173,12 +173,28 @@ def build_persona(
     *,
     workspace: Workspace | None = None,
     permission_policy: PermissionPolicy | None = None,
+    inject_context: bool = True,
 ) -> str:
-    """Compose the base persona with coding-agent instructions when needed."""
+    """Compose the base persona with coding-agent instructions when needed.
+
+    When *workspace* is set and *inject_context* is ``True``, the function
+    prepends project rules (``.hermes/rules.md``) and a workspace snapshot
+    before the coding prompt.
+    """
     if workspace is None:
         return base_persona
     policy = permission_policy or PermissionPolicy()
-    return base_persona + "\n\n" + build_coding_prompt(workspace, policy)
+
+    parts = [base_persona]
+
+    if inject_context:
+        from hermes_lite.coding.context_inject import build_context_preamble
+        preamble = build_context_preamble(workspace.root)
+        if preamble:
+            parts.append(preamble)
+
+    parts.append(build_coding_prompt(workspace, policy))
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +244,7 @@ async def _handle_dot_command(
                 print("  /mcp             Show MCP server connection status")
                 print("  /worktree        Show git worktree info")
                 print("  /plan <task>     Generate a subagent plan")
+                print("  /context         Show workspace context (branch, rules, changes)")
                 print("  /todo [text]     Add a todo item")
                 print("  /run             Resume agent execution stub")
                 print("  /resume <id>     Resume a command session")
@@ -492,6 +509,29 @@ async def _handle_dot_command(
                         print(f"    {msg[:200]}")
             elif result.get("ok"):
                 print("  All tests passed.")
+            return True
+
+        case "context":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            from hermes_lite.coding.context_inject import build_context_preamble
+            preamble = build_context_preamble(workspace_runtime.workspace.root)
+            print(preamble if preamble else "(no context available)")
+            return True
+
+        case "rules":
+            if workspace_runtime is None:
+                print("No workspace configured.")
+                return True
+            from hermes_lite.coding.context_inject import discover_rules
+            result = discover_rules(workspace_runtime.workspace.root)
+            if result["found"]:
+                print(f"Rules from {result['source']}:")
+                print(result["content"])
+            else:
+                print("No .hermes/rules.md (or CLAUDE.md/AGENTS.md) found in workspace.")
+                print("Create .hermes/rules.md to provide project-level instructions.")
             return True
 
         case "repomap":

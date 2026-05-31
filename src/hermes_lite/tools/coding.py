@@ -41,6 +41,7 @@ from hermes_lite.coding.subagents import (
     execute_subagent_plan,
     subagent_execute_with_commands,
 )
+from hermes_lite.coding.context_inject import discover_rules, workspace_snapshot
 from hermes_lite.coding.testing import discover_tests, extract_failure_locations, run_tests
 from hermes_lite.coding.worktree_exec import WorktreeExecutor
 from hermes_lite.coding.workspace import Workspace
@@ -696,4 +697,29 @@ def register_coding_tools(
             )
         ),
         toolset="coding",
+    )
+
+    # -- context injection tools -------------------------------------------
+
+    registry.register(
+        name="read_rules",
+        schema={
+            "description": "Read project rules from .hermes/rules.md (or CLAUDE.md/AGENTS.md as fallback).",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: discover_rules(workspace.root)),
+        toolset="coding",
+        parallel_safe=True,
+    )
+    registry.register(
+        name="workspace_context",
+        schema={
+            "description": "Get current workspace context: git branch, last commit, modified/staged file counts.",
+            "properties": {},
+            "required": [],
+        },
+        handler=as_json(lambda: workspace_snapshot(workspace.root)),
+        toolset="coding",
+        parallel_safe=True,
     )
